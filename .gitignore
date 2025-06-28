@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+langchain-ai-langgraph (1).txt
+uv.lock
+
+logs/*
+experiment_results/*
+conversation_logs/*
+
+.env
