@@ -1,4 +1,3 @@
-
 """
 Orchestrator with Subjective Views and Logging
 """
@@ -115,3 +114,91 @@ def run_debate(
 
     return result
 
+
+
+async def run_graph(topic: str, initial_speaker: str, agent_names: List[str], max_turns: int = 10):
+    """Asynchronous wrapper for running the debate graph and yielding events."""
+    
+    logger = setup_debate_logger()
+    
+    agent_states = {}
+    for name in agent_names:
+        subjective_view = get_subjective_perspective(name, AGENT_PERSONAS)
+        agent_states[name] = AgentState(
+            name=name,
+            persona=AGENT_PERSONAS[name],
+            chat_history=[],
+            subjective_view=subjective_view
+        )
+
+    initial_state = ConversationState(
+        topic=topic,
+        agent_states=agent_states,
+        next_speaker=initial_speaker,
+        current_turn=0,
+        max_turns=max_turns,
+        conclusion=None,
+        full_transcript=[],
+        logger=logger,
+        convergence_score=0.0,
+        ready_flags=[],
+        statement_embeddings=[],
+        facilitator_check_interval=8,
+        facilitator_action=None,
+        facilitator_message=None,
+        preliminary_conclusion=None,
+        final_comments=[],
+        topic_diversity=0.0,
+        discussion_depth=0.0,
+        pending_questions=[]
+    )
+
+    app = create_debate_graph()
+
+    async for event in app.astream_events(initial_state, version="v1", config={"recursion_limit": 50}):
+        kind = event["event"]
+        if kind == "on_chain_end":
+            if event["name"] == "agent_node":
+                # The output of agent_node is the entire state.
+                # We need to extract the latest message from the full_transcript.
+                state = event["data"]["output"]
+                if not state or not state.get("full_transcript"):
+                    continue
+                latest_transcript_entry = state.get("full_transcript", [])[-1]
+                
+                # The transcript is formatted as "[Turn X] Speaker: Message"
+                # We parse it to get the speaker and message
+                if ": " in latest_transcript_entry:
+                    parts = latest_transcript_entry.split(": ", 1)
+                    speaker_part = parts[0] # e.g., "[Turn 1] 佐藤"
+                    message = parts[1]
+                    
+                    # Extract speaker name from ".... Speaker]"
+                    speaker_name = speaker_part.split("] ")[-1]
+                else:
+                    # Fallback if format is unexpected
+                    speaker_name = "Unknown"
+                    message = latest_transcript_entry
+
+                yield {
+                    "type": "agent_message",
+                    "agent_name": speaker_name,
+                    "message": message,
+                }
+        elif kind == "on_chain_start":
+            if event["name"] == "facilitator_node":
+                yield {
+                    "type": "facilitator_message",
+                    "message": "Facilitator is checking the debate progress..."
+                }
+        elif kind == "on_tool_end":
+            if event["name"] == "Conclusion":
+                yield {
+                    "type": "conclusion",
+                    "conclusion": event["data"]["output"]
+                }
+
+    # The final state is not directly available in astream_events, 
+    # so we might need a separate call or different logic to get the final conclusion
+    # For now, we assume the 'conclusion' event is sufficient.
+    yield {"type": "end_of_debate"}
