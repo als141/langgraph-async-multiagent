@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from .state import ConversationState
 from .agents import ConversationalAgent, llm
+from pydantic import BaseModel, Field
 
 # Load .env from project root
 project_root = pathlib.Path(__file__).parent.parent.parent
@@ -21,6 +22,12 @@ load_dotenv(dotenv_path=env_path)
 
 # Initialize embeddings for convergence score calculation
 embeddings = OpenAIEmbeddings(api_key=os.getenv("OPENAI_API_KEY"))
+
+# --- Facilitator Decision Model ---
+class FacilitatorDecision(BaseModel):
+    action: str = Field(description="The action to take: 'continue', 'propose_conclusion', or 'call_vote'")
+    reasoning: str = Field(description="Explanation of why this action was chosen")
+    message: str = Field(description="Message to display to participants about the facilitation decision")
 
 # --- Graph Nodes ---
 
@@ -64,6 +71,12 @@ def agent_node(state: ConversationState) -> ConversationState:
     
     # Store the ready_to_conclude flag
     state["ready_flags"].append(decision.ready_to_conclude)
+    
+    # Detect questions that require responses
+    if any(marker in decision.response for marker in ["どう思う？", "どう考える？", "意見を聞かせて", "君はどう", "あなたはどう"]):
+        question = f"{speaker_name}: {decision.response.split('？')[0]}？"
+        if question not in state["pending_questions"]:
+            state["pending_questions"].append(question)
     
     # Log the turn
     turn_log = f"[Turn {state['current_turn']}] {speaker_name}: {decision.response}"
@@ -117,29 +130,220 @@ def update_metrics_node(state: ConversationState) -> ConversationState:
     total_flags = len(state["ready_flags"])
     readiness_ratio = ready_count / total_flags if total_flags > 0 else 0.0
     
-    # Log metrics for debugging
-    print(f" -> Metrics: Convergence Score: {state['convergence_score']:.3f}, Readiness: {ready_count}/{total_flags} ({readiness_ratio:.3f})")
+    # Update discussion depth based on question engagement
+    # If the current speaker is responding to someone in pending_questions, mark as answered
+    current_speaker = state["next_speaker"]
+    latest_statement = state["full_transcript"][-1] if state["full_transcript"] else ""
+    
+    # Remove answered questions
+    answered_questions = []
+    for question in state["pending_questions"]:
+        questioner = question.split(":")[0]
+        if questioner != current_speaker and current_speaker in latest_statement:
+            answered_questions.append(question)
+    
+    for answered in answered_questions:
+        state["pending_questions"].remove(answered)
+    
+    # Calculate discussion depth (higher when questions are being answered)
+    total_questions_asked = state["current_turn"] - len(state["pending_questions"])
+    state["discussion_depth"] = total_questions_asked / max(1, state["current_turn"])
+    
+    # Log enhanced metrics
+    pending_count = len(state["pending_questions"])
+    print(f" -> Metrics: Convergence: {state['convergence_score']:.3f}, Readiness: {ready_count}/{total_flags} ({readiness_ratio:.3f}), Depth: {state['discussion_depth']:.3f}, Pending Q: {pending_count}")
+    
+    return state
+
+def facilitator_node(state: ConversationState) -> ConversationState:
+    """Facilitator evaluates the debate and decides on the next action."""
+    print("\n--- Facilitator Evaluation ---")
+    
+    # Calculate current metrics
+    ready_count = sum(state["ready_flags"])
+    total_flags = len(state["ready_flags"])
+    readiness_ratio = ready_count / total_flags if total_flags > 0 else 0.0
+    
+    # Prepare context for facilitator
+    recent_turns = state["full_transcript"][-3:] if len(state["full_transcript"]) >= 3 else state["full_transcript"]
+    
+    facilitator_prompt = ChatPromptTemplate.from_messages([
+        SystemMessage(content="""あなたは議論のファシリテータです。議論全体を俯瞰し、以下の情報を元に最適な次のアクションを決定してください。
+
+**利用可能なアクション:**
+- "continue": 議論を継続させる（まだ議論が浅い、または新しい視点が期待できる場合）
+- "propose_conclusion": 議論をまとめるフェーズへの移行を提案する（十分に議論が深まった場合）
+- "call_vote": 意見が明確に分かれている場合に多数決を促す
+
+**判断基準（人間らしい会話を最優先）:**
+1. **NEVER interrupt if there are pending questions** - 質問が残っている場合は絶対に継続
+2. **Continue if discussion_depth < 0.7** - 議論の深さが不十分な場合は継続
+3. **Continue if current_turn < max_turns * 0.6** - 最大ターンの60%未満は基本的に継続
+4. 議論が真に停滞している場合（同じ論点の3回以上の反復）のみ "propose_conclusion"
+5. 準備完了率 > 80% かつ 残りターン < 3 の場合のみ "propose_conclusion"
+
+議論のテーマ: {topic}"""),
+        HumanMessage(content=f"""
+**現在の議論状況:**
+- 現在のターン: {state['current_turn']} / {state['max_turns']}
+- 議論の進行率: {(state['current_turn'] / state['max_turns'] * 100):.1f}%
+- 収束スコア: {state['convergence_score']:.3f}
+- 準備完了率: {readiness_ratio:.3f} ({ready_count}/{total_flags})
+- 議論の深さ: {state['discussion_depth']:.3f}
+- 未回答の質問数: {len(state['pending_questions'])}
+
+**未回答の質問:**
+{chr(10).join(state['pending_questions']) if state['pending_questions'] else "なし"}
+
+**直近の議論内容:**
+{chr(10).join(recent_turns)}
+
+**重要:** 未回答の質問がある場合は必ず "continue" を選択してください。議論の自然な流れを最優先してください。
+""")
+    ])
+    
+    # Create facilitator chain with structured output
+    facilitator_llm = llm.with_structured_output(FacilitatorDecision)
+    facilitator_chain = facilitator_prompt | facilitator_llm
+    
+    # Get facilitator decision
+    decision = facilitator_chain.invoke({
+        "topic": state["topic"]
+    })
+    
+    # Update state with facilitator decision
+    state["facilitator_action"] = decision.action
+    state["facilitator_message"] = decision.message
+    
+    # Log facilitator decision
+    print(f"Facilitator Decision: {decision.action}")
+    print(f"Reasoning: {decision.reasoning}")
+    print(f"Message: {decision.message}")
+    state["logger"].info(f"Facilitator Decision: {decision.action} - {decision.reasoning}")
+    
+    return state
+
+def pre_conclusion_node(state: ConversationState) -> ConversationState:
+    """Generates a preliminary conclusion draft for agent review."""
+    print("\n--- Pre-Conclusion: Preparing Draft Summary ---")
+    
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessage(content="""あなたは議論のファシリテータです。これまでの議論をまとめて、暫定的な結論案を作成してください。
+
+**重要な指示:**
+1. 議論全体を客観的に要約してください
+2. 主要な論点とそれぞれの立場を明確に記述してください
+3. 合意に至った点と意見が分かれた点を区別してください
+4. 「これはまだ暫定的なまとめです」ということを明記してください
+5. 参加者に補足や修正意見を求めてください
+
+議論のテーマ: {topic}"""),
+        HumanMessage(content=f"""
+以下の議論の記録を基に、暫定的な結論案を作成してください：
+
+{chr(10).join(state['full_transcript'])}
+
+上記の議論を踏まえ、暫定的なまとめを作成し、参加者に最終確認を求めてください。
+""")
+    ])
+    
+    chain = prompt | llm
+    preliminary_conclusion = chain.invoke({"topic": state["topic"]}).content
+    
+    state["preliminary_conclusion"] = preliminary_conclusion
+    
+    print(f"Preliminary Conclusion: {preliminary_conclusion}")
+    state["logger"].info(f"Preliminary conclusion generated: {preliminary_conclusion}")
+    
+    return state
+
+def final_comment_node(state: ConversationState) -> ConversationState:
+    """Allows agents to provide final comments on the preliminary conclusion."""
+    print("\n--- Final Comments: Last Chance for Input ---")
+    
+    agent_names = list(state["agent_states"].keys())
+    
+    # Get final comments from all agents
+    for agent_name in agent_names:
+        print(f"\n--- {agent_name}の最終意見 ---")
+        
+        agent_state = state["agent_states"][agent_name]
+        
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=f"""あなたは{agent_name}です。ファシリテータが作成した暫定的な結論案を確認し、最終的な意見を述べてください。
+
+**あなたの役割:** {agent_state['persona']}
+
+**指示:**
+1. 暫定的な結論案を読んで、内容が議論を適切に反映しているか確認してください
+2. 重要な論点の見落としや誤解がないかチェックしてください  
+3. 必要であれば補足や修正を提案してください
+4. 簡潔に（2-3文程度で）最終意見を述べてください
+5. もし結論案に満足している場合は、その旨を述べてください"""),
+            HumanMessage(content=f"""
+**暫定的な結論案:**
+{state['preliminary_conclusion']}
+
+上記の結論案について、あなたの最終的な意見を述べてください。重要な見落としや修正が必要な点があれば指摘し、なければ結論案への賛同を表明してください。
+""")
+        ])
+        
+        chain = prompt | llm
+        final_comment = chain.invoke({}).content
+        
+        state["final_comments"].append(f"[{agent_name}] {final_comment}")
+        
+        print(f"{agent_name}: {final_comment}")
+        state["logger"].info(f"Final comment from {agent_name}: {final_comment}")
     
     return state
 
 def conclusion_node(state: ConversationState) -> ConversationState:
-    """Generates the final conclusion for the debate."""
-    print("\n--- Generating Conclusion ---")
-    prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content="あなたは議論の結論をまとめる専門家です。以下の議論の完全な記録を読み、最終的な結論を客観的に要約してください。意見が分かれた場合は、それも明確に記述してください。議論のテーマ：" + state["topic"]),
-        HumanMessage(content="\n".join(state["full_transcript"])) 
-    ])
+    """Generates the final conclusion incorporating preliminary conclusion and final comments."""
+    print("\n--- Generating Final Conclusion ---")
+    
+    # Check if we have preliminary conclusion and final comments (phased termination)
+    if state["preliminary_conclusion"] and state["final_comments"]:
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=f"""あなたは議論の結論をまとめる専門家です。以下の情報を統合して、最終的な結論を作成してください。
+
+**重要な指示:**
+1. 暫定的な結論案を基礎として使用してください
+2. 参加者の最終意見を十分に考慮して、必要な修正や補足を行ってください
+3. 最終的な結論は包括的で、全ての重要な論点を含むようにしてください
+4. 意見が分かれた場合は、それも明確に記述してください
+
+議論のテーマ: {state["topic"]}"""),
+            HumanMessage(content=f"""
+**暫定的な結論案:**
+{state['preliminary_conclusion']}
+
+**参加者の最終意見:**
+{chr(10).join(state['final_comments'])}
+
+**完全な議論記録:**
+{chr(10).join(state['full_transcript'])}
+
+上記の情報を統合して、最終的な結論を作成してください。
+""")
+        ])
+    else:
+        # Fallback to original conclusion generation
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content="あなたは議論の結論をまとめる専門家です。以下の議論の完全な記録を読み、最終的な結論を客観的に要約してください。意見が分かれた場合は、それも明確に記述してください。議論のテーマ：" + state["topic"]),
+            HumanMessage(content="\n".join(state["full_transcript"])) 
+        ])
     
     chain = prompt | llm
     conclusion = chain.invoke({}).content
     state["conclusion"] = conclusion
-    print(f"Conclusion: {conclusion}")
+    print(f"Final Conclusion: {conclusion}")
     return state
 
 # --- Conditional Routing ---
 
-def route_to_next_speaker(state: ConversationState) -> str:
-    """Routes to the conclusion node or back to the agent node with enhanced termination conditions."""
+def route_after_metrics(state: ConversationState) -> str:
+    """Routes after metrics update - checks if facilitator should intervene."""
     # Check if explicit conclusion was requested
     if state["next_speaker"] == "Conclusion":
         return "conclusion_node"
@@ -148,26 +352,55 @@ def route_to_next_speaker(state: ConversationState) -> str:
     if state["current_turn"] >= state["max_turns"]:
         return "conclusion_node"
     
-    # Enhanced termination conditions based on monitoring metrics
+    # NEVER interrupt if there are pending questions - respect human-like conversation
+    if state["pending_questions"]:
+        print(f" -> Continuing: {len(state['pending_questions'])} pending questions must be answered")
+        return "agent_node"
+    
+    # Check if it's time for facilitator intervention
+    if state["current_turn"] % state["facilitator_check_interval"] == 0 and state["current_turn"] > 0:
+        return "facilitator_node"
+    
+    # Enhanced termination conditions - much more conservative
     ready_count = sum(state["ready_flags"])
     total_flags = len(state["ready_flags"])
     readiness_ratio = ready_count / total_flags if total_flags > 0 else 0.0
     
-    # Terminate if convergence score is high AND readiness ratio exceeds threshold
-    if state["convergence_score"] > 0.95 and readiness_ratio > 0.66:
-        print(f" -> Auto-termination triggered: High convergence ({state['convergence_score']:.3f}) + High readiness ({readiness_ratio:.3f})")
+    # Only terminate if VERY high confidence AND near end
+    remaining_turns = state["max_turns"] - state["current_turn"]
+    if (state["convergence_score"] > 0.98 and 
+        readiness_ratio > 0.8 and 
+        remaining_turns <= 2 and
+        state["discussion_depth"] > 0.7):
+        print(f" -> Auto-termination: Very high confidence (Conv: {state['convergence_score']:.3f}, Ready: {readiness_ratio:.3f}, Depth: {state['discussion_depth']:.3f})")
         return "conclusion_node"
     
     return "agent_node"
 
+def route_after_facilitator(state: ConversationState) -> str:
+    """Routes after facilitator evaluation."""
+    facilitator_action = state["facilitator_action"]
+    
+    if facilitator_action == "propose_conclusion":
+        return "pre_conclusion_node"
+    elif facilitator_action == "call_vote":
+        # For now, treat call_vote as continue (can be extended later)
+        print(" -> Facilitator called for vote, but continuing discussion for now")
+        return "agent_node"
+    else:  # "continue"
+        return "agent_node"
+
 # --- Graph Definition ---
 
 def create_debate_graph() -> StateGraph:
-    """Creates the LangGraph workflow for the debate."""
+    """Creates the LangGraph workflow for the debate with facilitator and phased termination."""
     workflow = StateGraph(ConversationState)
 
     workflow.add_node("agent_node", agent_node)
     workflow.add_node("update_metrics_node", update_metrics_node)
+    workflow.add_node("facilitator_node", facilitator_node)
+    workflow.add_node("pre_conclusion_node", pre_conclusion_node)
+    workflow.add_node("final_comment_node", final_comment_node)
     workflow.add_node("conclusion_node", conclusion_node)
 
     workflow.set_entry_point("agent_node")
@@ -178,12 +411,28 @@ def create_debate_graph() -> StateGraph:
     # Update metrics node uses conditional routing
     workflow.add_conditional_edges(
         "update_metrics_node",
-        route_to_next_speaker,
+        route_after_metrics,
         {
             "agent_node": "agent_node",
+            "facilitator_node": "facilitator_node",
             "conclusion_node": "conclusion_node",
         }
     )
+    
+    # Facilitator node routes based on its decision
+    workflow.add_conditional_edges(
+        "facilitator_node",
+        route_after_facilitator,
+        {
+            "agent_node": "agent_node",
+            "pre_conclusion_node": "pre_conclusion_node",
+        }
+    )
+    
+    # Phased termination flow
+    workflow.add_edge("pre_conclusion_node", "final_comment_node")
+    workflow.add_edge("final_comment_node", "conclusion_node")
+    
     workflow.add_edge("conclusion_node", END)
 
     return workflow.compile()

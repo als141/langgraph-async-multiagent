@@ -73,7 +73,18 @@ def run_debate(
         # Initialize monitoring fields
         convergence_score=0.0,
         ready_flags=[],
-        statement_embeddings=[]
+        statement_embeddings=[],
+        # Initialize facilitator fields
+        facilitator_check_interval=8,  # Check every 8 turns
+        facilitator_action=None,
+        facilitator_message=None,
+        # Initialize phased termination fields
+        preliminary_conclusion=None,
+        final_comments=[],
+        # Initialize discussion quality metrics
+        topic_diversity=0.0,
+        discussion_depth=0.0,
+        pending_questions=[]
     )
 
     # 2. Create the graph
@@ -88,7 +99,8 @@ def run_debate(
     print("-------------------------")
 
     start_time = time.time()
-    final_state = app.invoke(initial_state)
+    # Increase recursion limit to allow for longer, more natural conversations
+    final_state = app.invoke(initial_state, config={"recursion_limit": 50})
     end_time = time.time()
 
     # 4. Format and return the results

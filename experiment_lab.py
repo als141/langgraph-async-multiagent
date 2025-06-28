@@ -9,10 +9,10 @@ def main():
     """Main function to run a sample debate."""
     
     # --- Debate Configuration ---
-    topic = "リモートワークを導入すべきか？"
+    topic = "消費税を減税すべきか？"
     agent_names = ["佐藤", "鈴木", "田中"]
     initial_speaker = "佐藤"
-    max_turns = 7
+    max_turns = 20
 
     # --- Run the Debate ---
     result = run_debate(
