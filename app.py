@@ -1,4 +1,3 @@
-
 import streamlit as st
 import asyncio
 import sys
@@ -60,11 +59,23 @@ if conclusion_data or st.session_state.status_message:
 st.divider()
 
 # --- Input & Control Section ---
-topic_input = st.text_input(
-    "Enter the topic for debate:",
-    placeholder="例：消費税減税は日本経済にプラスか？",
-    disabled=st.session_state.is_running,
-)
+col1, col2 = st.columns([3, 1])
+with col1:
+    topic_input = st.text_input(
+        "Enter the topic for debate:",
+        placeholder="例：消費税減税は日本経済にプラスか？",
+        disabled=st.session_state.is_running,
+    )
+with col2:
+    max_turns_input = st.number_input(
+        "Max Turns",
+        min_value=2,
+        max_value=50,
+        value=10,
+        step=1,
+        disabled=st.session_state.is_running,
+        help="Set the maximum number of turns for the debate."
+    )
 
 if st.button("Start Debate", disabled=st.session_state.is_running or not topic_input):
     st.session_state.messages = [{"role": "user", "content": f"**Topic:** {topic_input}"}]
@@ -73,7 +84,12 @@ if st.button("Start Debate", disabled=st.session_state.is_running or not topic_i
     st.session_state.is_running = True
     agent_names = list(AGENT_PERSONAS.keys())
     initial_speaker = "佐藤"
-    st.session_state.debate_generator = run_graph(topic_input, initial_speaker, agent_names)
+    st.session_state.debate_generator = run_graph(
+        topic_input, 
+        initial_speaker, 
+        agent_names, 
+        max_turns=max_turns_input
+    )
     st.rerun()
 
 # --- Processing Loop ---
