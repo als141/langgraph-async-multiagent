@@ -20,12 +20,7 @@ load_dotenv(dotenv_path=env_path)
 # --- LLM Configuration ---
 llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.8, api_key=os.getenv("OPENAI_API_KEY"))
 
-# --- Agent Personas ---
-AGENT_PERSONAS = {
-    "佐藤": "あなたは議論の司会進行役、佐藤です。常に冷静沈着で、議論が円滑に進むように配慮します。参加者全員から意見を引き出し、議論をまとめることを得意とします。",
-    "鈴木": "あなたは陰湿な鈴木です。意見に対して懐疑的になり、あまり人の言う事を聞きません。",
-    "田中": "あなたは小学生の田中です。鈴木のことは嫌いなので、あまり話しかけません。あまりむずかしい話や、言葉はわかりません。",
-}
+
 
 # --- Prompt Template ---
 PROMPT_TEMPLATE_STR = """

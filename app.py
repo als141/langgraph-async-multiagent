@@ -1,3 +1,4 @@
+
 import streamlit as st
 import asyncio
 import sys
@@ -6,12 +7,16 @@ import os
 # --- Path Setup ---
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 from multiagent_debate.orchestrator import run_graph
-from multiagent_debate.agents import AGENT_PERSONAS
+from multiagent_debate.config import AGENTS_CONFIG # Import the single source of truth
 
 # --- UI Configuration ---
 st.set_page_config(page_title="Multi-Agent Debate", layout="wide")
 st.title("🧠 Multi-Agent Debate")
-AGENT_AVATARS = {"佐藤": "🧑‍🏫", "鈴木": "😒", "田中": "👦", "Facilitator": "🤖", "user": "👤"}
+
+# Generate AGENT_AVATARS dynamically from the config
+AGENT_AVATARS = {agent["name"]: agent["avatar"] for agent in AGENTS_CONFIG}
+AGENT_AVATARS["user"] = "👤"
+AGENT_AVATARS["status"] = "⚙️"
 
 # --- Session State Initialization ---
 if "is_running" not in st.session_state:
@@ -71,7 +76,7 @@ with col2:
         "Max Turns",
         min_value=2,
         max_value=50,
-        value=10,
+        value=30,
         step=1,
         disabled=st.session_state.is_running,
         help="Set the maximum number of turns for the debate."
@@ -82,12 +87,8 @@ if st.button("Start Debate", disabled=st.session_state.is_running or not topic_i
     st.session_state.conclusion_data = {}
     st.session_state.status_message = ""
     st.session_state.is_running = True
-    agent_names = list(AGENT_PERSONAS.keys())
-    initial_speaker = "佐藤"
     st.session_state.debate_generator = run_graph(
         topic_input, 
-        initial_speaker, 
-        agent_names, 
         max_turns=max_turns_input
     )
     st.rerun()

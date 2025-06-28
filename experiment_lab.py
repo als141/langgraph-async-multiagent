@@ -1,31 +1,52 @@
-"""
-🧪 New Multi-Agent Debate System - Demonstration
-"""
 import asyncio
-import json
-from src.multiagent_debate.orchestrator import run_debate
+import pprint
+import sys
+import os
 
-def main():
-    """Main function to run a sample debate."""
-    
-    # --- Debate Configuration ---
-    topic = "消費税を減税すべきか？"
-    agent_names = ["佐藤", "鈴木", "田中"]
-    initial_speaker = "佐藤"
-    max_turns = 20
+# Add the src directory to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 
-    # --- Run the Debate ---
-    result = run_debate(
-        topic=topic,
-        agent_names=agent_names,
-        initial_speaker=initial_speaker,
-        max_turns=max_turns
-    )
+from multiagent_debate.orchestrator import run_graph
+from multiagent_debate.config import AGENTS_CONFIG
 
-    # --- Print the Results ---
-    print("\n--- Debate Finished ---")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-    print("-----------------------")
+async def main():
+    """Main function to run the debate from the command line."""
+    topic = "消費税減税は日本経済にプラスか？"
+    max_turns = 10
+
+    print(f"--- Starting Debate ---")
+    print(f"Topic: {topic}")
+    agent_names = [agent["name"] for agent in AGENTS_CONFIG]
+    print(f"Participants: {', '.join(agent_names)}")
+    print(f"Max Turns: {max_turns}")
+    print("-------------------------")
+
+    final_conclusion = None
+
+    async for event in run_graph(topic, max_turns=max_turns):
+        if event["type"] == "agent_message":
+            # The message is already printed by the graph node, so we just observe
+            pass
+        elif event["type"] == "status_update":
+            print(f"\n--- {event['message']} ---\n")
+        elif event["type"] == "facilitator_message":
+            print(f"\n--- Facilitator: {event['message']} ---\n")
+        elif event["type"] == "pre_conclusion":
+            print("\n--- Preliminary Conclusion ---")
+            pprint.pprint(event["content"])
+        elif event["type"] == "final_comments":
+            print("\n--- Final Comments ---")
+            for comment in event["content"]:
+                print(comment)
+        elif event["type"] == "conclusion":
+            final_conclusion = event["conclusion"]
+            print("\n--- Final Conclusion ---")
+            pprint.pprint(final_conclusion)
+        elif event["type"] == "end_of_debate":
+            print("\n--- End of Debate ---")
+
+    if not final_conclusion:
+        print("\nDebate ended without a formal conclusion.")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

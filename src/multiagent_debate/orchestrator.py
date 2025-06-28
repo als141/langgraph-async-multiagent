@@ -1,3 +1,5 @@
+
+
 """
 Orchestrator with Subjective Views and Logging
 """
@@ -10,7 +12,7 @@ from langchain_core.messages import SystemMessage
 
 from .state import ConversationState, AgentState
 from .graph import create_debate_graph
-from .agents import AGENT_PERSONAS
+from .config import AGENTS_CONFIG # Import the single source of truth
 
 def setup_debate_logger(log_dir="logs"):
     """Sets up a logger for the debate transcript."""
@@ -28,28 +30,32 @@ def setup_debate_logger(log_dir="logs"):
     
     return logger
 
-def get_subjective_perspective(my_name: str, all_agents: Dict[str, str]) -> str:
-    """Generates a subjective description of other agents."""
+def get_subjective_perspective_from_config(my_name: str, all_agents_config: List[Dict[str, Any]]) -> str:
+    """Generates a subjective description of other agents from the config."""
+    my_config = next((agent for agent in all_agents_config if agent["name"] == my_name), None)
+    if not my_config or "subjective_views" not in my_config:
+        return ""
+    
     descriptions = []
-    for name, persona in all_agents.items():
-        if name == my_name:
-            continue
-        # A simple summary of the persona string
-        role = persona.split('、')[1].replace('です。', '')
-        descriptions.append(f"- {name}: {role}")
+    for target_name, view in my_config["subjective_views"].items():
+        descriptions.append(f"- {target_name}: {view}")
     return "\n".join(descriptions)
 
-async def run_graph(topic: str, initial_speaker: str, agent_names: List[str], max_turns: int = 10):
+async def run_graph(topic: str, max_turns: int = 10):
     """Asynchronous wrapper for running the debate graph and yielding events."""
     
     logger = setup_debate_logger()
     
+    agent_names = [agent["name"] for agent in AGENTS_CONFIG]
+    initial_speaker = agent_names[0] if agent_names else ""
+
     agent_states = {}
-    for name in agent_names:
-        subjective_view = get_subjective_perspective(name, AGENT_PERSONAS)
-        agent_states[name] = AgentState(
-            name=name,
-            persona=AGENT_PERSONAS[name],
+    for agent_config in AGENTS_CONFIG:
+        agent_name = agent_config["name"]
+        subjective_view = get_subjective_perspective_from_config(agent_name, AGENTS_CONFIG)
+        agent_states[agent_name] = AgentState(
+            name=agent_name,
+            persona=agent_config["persona"],
             chat_history=[],
             subjective_view=subjective_view
         )
