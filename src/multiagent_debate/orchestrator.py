@@ -157,48 +157,35 @@ async def run_graph(topic: str, initial_speaker: str, agent_names: List[str], ma
 
     async for event in app.astream_events(initial_state, version="v1", config={"recursion_limit": 50}):
         kind = event["event"]
-        if kind == "on_chain_end":
-            if event["name"] == "agent_node":
-                # The output of agent_node is the entire state.
-                # We need to extract the latest message from the full_transcript.
-                state = event["data"]["output"]
-                if not state or not state.get("full_transcript"):
+        node_name = event["name"]
+
+        if kind == "on_chain_start":
+            if node_name == "facilitator_node":
+                yield {"type": "status_update", "message": "Facilitator is checking the debate progress..."}
+            elif node_name == "conclusion_node":
+                yield {"type": "status_update", "message": "Generating Final Conclusion..."}
+
+        elif kind == "on_chain_end":
+            output = event["data"].get("output")
+
+            if node_name == "agent_node":
+                if not output or not output.get("full_transcript"):
                     continue
-                latest_transcript_entry = state.get("full_transcript", [])[-1]
+                latest_transcript_entry = output.get("full_transcript", [])[-1]
                 
-                # The transcript is formatted as "[Turn X] Speaker: Message"
-                # We parse it to get the speaker and message
                 if ": " in latest_transcript_entry:
                     parts = latest_transcript_entry.split(": ", 1)
-                    speaker_part = parts[0] # e.g., "[Turn 1] 佐藤"
+                    speaker_part = parts[0]
                     message = parts[1]
-                    
-                    # Extract speaker name from ".... Speaker]"
                     speaker_name = speaker_part.split("] ")[-1]
                 else:
-                    # Fallback if format is unexpected
                     speaker_name = "Unknown"
                     message = latest_transcript_entry
 
-                yield {
-                    "type": "agent_message",
-                    "agent_name": speaker_name,
-                    "message": message,
-                }
-        elif kind == "on_chain_start":
-            if event["name"] == "facilitator_node":
-                yield {
-                    "type": "facilitator_message",
-                    "message": "Facilitator is checking the debate progress..."
-                }
-        elif kind == "on_tool_end":
-            if event["name"] == "Conclusion":
-                yield {
-                    "type": "conclusion",
-                    "conclusion": event["data"]["output"]
-                }
+                yield {"type": "agent_message", "agent_name": speaker_name, "message": message}
+            
+            elif node_name == "conclusion_node":
+                if output and output.get("conclusion"):
+                    yield {"type": "conclusion", "conclusion": output.get("conclusion")}
 
-    # The final state is not directly available in astream_events, 
-    # so we might need a separate call or different logic to get the final conclusion
-    # For now, we assume the 'conclusion' event is sufficient.
     yield {"type": "end_of_debate"}

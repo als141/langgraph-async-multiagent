@@ -1,101 +1,102 @@
+
 import streamlit as st
 import asyncio
 import sys
 import os
 
-# Add the src directory to the Python path to allow for absolute imports
+# --- Path Setup ---
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
-
 from multiagent_debate.orchestrator import run_graph
 from multiagent_debate.agents import AGENT_PERSONAS
-from src.multiagent_debate.agents import AGENT_PERSONAS
 
 # --- UI Configuration ---
 st.set_page_config(page_title="Multi-Agent Debate", layout="wide")
 st.title("🧠 Multi-Agent Debate")
+AGENT_AVATARS = {"佐藤": "🧑‍🏫", "鈴木": "😒", "田中": "👦", "Facilitator": "🤖", "user": "👤", "status": "⚙️"}
 
-# Define avatars for agents
-AGENT_AVATARS = {
-    "佐藤": "🧑‍🏫",
-    "鈴木": "😒",
-    "田中": "👦",
-    "Facilitator": "🤖"
-}
-
-# --- Main Application Logic ---
-
-# Initialize session state for messages if not present
+# --- Session State Initialization ---
+if "is_running" not in st.session_state:
+    st.session_state.is_running = False
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "conclusion" not in st.session_state:
+    st.session_state.conclusion = None
+if "debate_generator" not in st.session_state:
+    st.session_state.debate_generator = None
+if "event_loop" not in st.session_state:
+    try:
+        st.session_state.event_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        st.session_state.event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(st.session_state.event_loop)
 
-# Display existing chat messages
-for message in st.session_state.messages:
-    avatar = AGENT_AVATARS.get(message["role"], "👤")
-    with st.chat_message(message["role"], avatar=avatar):
-        st.markdown(message["content"])
+# --- UI Rendering ---
+chat_container = st.container()
+with chat_container:
+    for msg in st.session_state.messages:
+        avatar = AGENT_AVATARS.get(msg["role"], "👤")
+        with st.chat_message(msg["role"], avatar=avatar):
+            st.markdown(msg["content"], unsafe_allow_html=True)
 
-# Input controls
-topic = st.text_input("Enter the topic for debate:", placeholder="例：日本の教育制度の未来について")
+if st.session_state.conclusion:
+    st.subheader("🏆 Final Conclusion")
+    st.success(st.session_state.conclusion)
 
-if st.button("Start Debate"):
-    if topic:
-        # --- Start of a new debate ---
-        st.session_state.messages = []
-        
-        # Display user's topic
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(f"**Topic:** {topic}")
-        st.session_state.messages.append({"role": "user", "content": f"**Topic:** {topic}"})
+st.divider()
 
-        # Define debate participants
-        agent_names = list(AGENT_PERSONAS.keys())
-        initial_speaker = "佐藤" # Facilitator starts
+# --- Input & Control Section ---
+topic_input = st.text_input(
+    "Enter the topic for debate:",
+    placeholder="例：消費税減税は日本経済にプラスか？",
+    disabled=st.session_state.is_running,
+)
 
-        # Placeholder for the final conclusion
-        conclusion_placeholder = st.empty()
+if st.button("Start Debate", disabled=st.session_state.is_running or not topic_input):
+    st.session_state.messages = [{
+        "role": "user", 
+        "content": f"**Topic:** {topic_input}"
+    }]
+    st.session_state.conclusion = None
+    st.session_state.is_running = True
+    agent_names = list(AGENT_PERSONAS.keys())
+    initial_speaker = "佐藤"
+    st.session_state.debate_generator = run_graph(topic_input, initial_speaker, agent_names)
+    st.rerun()
 
-        # Run the debate asynchronously and stream results
+# --- Processing Loop ---
+if st.session_state.is_running:
+    with st.spinner("Debate in progress..."):
         try:
-            async def stream_debate():
-                # Use a spinner to indicate progress
-                with st.spinner("Debate in progress..."):
-                    async for event in run_graph(topic, initial_speaker, agent_names):
-                        if event["type"] == "agent_message":
-                            agent_name = event["agent_name"]
-                            message_content = event["message"]
-                            avatar = AGENT_AVATARS.get(agent_name, "👤")
-                            
-                            with st.chat_message(agent_name, avatar=avatar):
-                                st.markdown(message_content)
-                            
-                            st.session_state.messages.append({"role": agent_name, "content": message_content})
+            loop = st.session_state.event_loop
+            generator = st.session_state.debate_generator
+            event = loop.run_until_complete(generator.__anext__())
 
-                        elif event["type"] == "facilitator_message":
-                            message_content = event["message"]
-                            avatar = AGENT_AVATARS.get("Facilitator", "🤖")
+            if event["type"] == "agent_message":
+                agent_name = event["agent_name"]
+                # Prepend the agent's name to the message for clear identification
+                message_content = f"**{agent_name}:** {event['message']}"
+                st.session_state.messages.append({"role": agent_name, "content": message_content})
+            
+            elif event["type"] == "status_update":
+                # Display status updates with a distinct style
+                st.session_state.messages.append({"role": "status", "content": f'*_{event["message"]}_*'})
 
-                            with st.chat_message("Facilitator", avatar=avatar):
-                                st.info(message_content)
-                            
-                            st.session_state.messages.append({"role": "Facilitator", "content": message_content})
-
-                        elif event["type"] == "conclusion":
-                            conclusion_text = event["conclusion"]
-                            with conclusion_placeholder.container():
-                                st.success(f"**Conclusion:**\n\n{conclusion_text}")
-                            
-                            st.session_state.messages.append({"role": "Conclusion", "content": conclusion_text})
-
-                        elif event["type"] == "end_of_debate":
-                            st.info("The debate has concluded.")
-                            break
+            elif event["type"] == "conclusion":
+                st.session_state.conclusion = event["conclusion"]
+            
+            elif event["type"] == "end_of_debate":
+                st.session_state.is_running = False
                 st.balloons()
 
-            # Run the async function
-            asyncio.run(stream_debate())
+            st.rerun()
 
+        except StopAsyncIteration:
+            st.session_state.is_running = False
+            if not st.session_state.conclusion:
+                 st.warning("The debate ended without a formal conclusion.")
+            st.balloons()
+            st.rerun()
         except Exception as e:
             st.error(f"An error occurred: {e}")
-
-    else:
-        st.warning("Please enter a topic to start the debate.")
+            st.session_state.is_running = False
+            st.rerun()
