@@ -29,30 +29,7 @@ llm = ChatOpenAI(
 
 
 
-# --- Prompt Template for Streaming ---
-STREAMING_PROMPT_STR = """
-**あなたの情報:**
-{persona}
-
-**他の参加者に対するあなたの主観的な視点:**
-{subjective_view}
-
-**現在の議論トピック:**
-{topic}
-
-**議論のルール:**
-1.  **役割を演じる:** あなたのペルソナと、他の参加者への視点に基づいて、一貫した意見を述べてください。また、同年代に話すように、カジュアルにタメ口で話してください。発言はより簡単に、長くならないようにしてください。また、話し言葉で話すようにしてね。あとは人間らしい会話、反応をするようにしてください。
-2.  **議論を深める:** 単に同意するだけでなく、あえて異なる視点を提示したり、疑問を投げかけたり、批判的な意見を述べることを推奨します。
-3.  **次の発言者を指名:** 発言の最後に、必ず次の発言者を指名してください。
-
-**重要:** 
-- あなたの発言内容のみを出力してください。JSON形式やフィールド名などは一切含めないでください。
-- 参加者への質問は自然な形で含めてください。
-- 次に話すべき人の名前は発言の最後で自然に指名してください（例：「田中、どう思う？」）。
-- 利用可能な参加者: {agent_names_str}
-"""
-
-# --- Prompt Template for Structured Output ---
+# --- Prompt Template ---
 PROMPT_TEMPLATE_STR = """
 **あなたの情報:**
 {persona}
@@ -101,19 +78,13 @@ class ConversationalAgent:
             method="json_mode"
         )
         
-        # Structured output chain for final decision
-        structured_prompt = ChatPromptTemplate.from_messages([
+        # Unified prompt for both streaming and structured output
+        prompt = ChatPromptTemplate.from_messages([
             ("system", PROMPT_TEMPLATE_STR),
             MessagesPlaceholder(variable_name="chat_history"),
         ])
-        self.chain = structured_prompt | self.structured_llm
-        
-        # Streaming chain for natural language output
-        streaming_prompt = ChatPromptTemplate.from_messages([
-            ("system", STREAMING_PROMPT_STR),
-            MessagesPlaceholder(variable_name="chat_history"),
-        ])
-        self.streaming_chain = streaming_prompt | llm
+        self.chain = prompt | self.structured_llm
+        self.streaming_chain = prompt | llm
 
     def invoke(self) -> BaseModel:
         """Invoke the agent to get its decision."""
@@ -127,7 +98,7 @@ class ConversationalAgent:
         })
 
     async def astream_decision(self):
-        """Stream the agent's natural language response, then get structured decision."""
+        """Stream response with simple character-by-character extraction."""
         agent_names_str = ", ".join(self.all_agent_names)
         input_data = {
             "persona": self.agent_state["persona"],
@@ -137,8 +108,9 @@ class ConversationalAgent:
             "chat_history": self.agent_state["chat_history"],
         }
         
-        # Stream the natural language response
+        # Stream the raw response and immediately display chunks
         full_response = ""
+        
         async for chunk in self.streaming_chain.astream(input_data):
             if hasattr(chunk, 'content'):
                 content = chunk.content
@@ -161,45 +133,93 @@ class ConversationalAgent:
                     if content_str.strip() in ["{'index': 0}", "{'index':0}", "{\"index\":0}", "{\"index\": 0}"]:
                         content_str = ""
                 
-                full_response += content_str
-                if content_str:  # Only yield non-empty content
+                if content_str:
+                    full_response += content_str
+                    # For now, just stream everything and filter later
                     yield {"type": "chunk", "content": content_str}
         
-        # Now get structured decision using the natural language response
+        # Parse the complete response for structured output
         try:
-            # Get structured decision
-            structured_decision = await self.chain.ainvoke(input_data)
-            
-            # Create final decision using streamed response text and structured metadata
-            class StreamedDecision(BaseModel):
-                thoughts: str = Field(default="Generated from streaming response")
-                response: str
-                next_agent: str
-                ready_to_conclude: bool
-            
-            final_decision = StreamedDecision(
-                response=full_response.strip(),
-                next_agent=structured_decision.next_agent,
-                ready_to_conclude=structured_decision.ready_to_conclude
-            )
+            final_decision = await self.chain.ainvoke(input_data)
             yield {"type": "complete", "decision": final_decision, "full_response": full_response}
             
         except Exception as e:
-            print(f"Structured decision failed: {e}, falling back to parsing")
-            # Fallback: parse next agent from natural language response
-            next_agent = self._parse_next_agent_from_text(full_response)
-            
-            class FallbackDecision(BaseModel):
-                thoughts: str = Field(default="Parsed from natural language")
-                response: str
-                next_agent: str
-                ready_to_conclude: bool = Field(default=False)
-            
-            decision = FallbackDecision(
-                response=full_response.strip(),
-                next_agent=next_agent
-            )
-            yield {"type": "complete", "decision": decision, "full_response": full_response}
+            print(f"Structured decision failed: {e}, attempting JSON parsing")
+            # Fallback: try to parse the full response as JSON
+            try:
+                import json
+                
+                # Clean up the response for JSON parsing
+                json_str = full_response.strip()
+                if not json_str.startswith('{'):
+                    # Find the first { and last }
+                    start_brace = json_str.find('{')
+                    end_brace = json_str.rfind('}')
+                    if start_brace != -1 and end_brace != -1:
+                        json_str = json_str[start_brace:end_brace + 1]
+                
+                parsed_json = json.loads(json_str)
+                
+                # Extract required fields
+                response_text = parsed_json.get("response", "")
+                next_agent = parsed_json.get("next_agent", self.all_agent_names[0] if self.all_agent_names else "Conclusion")
+                ready_to_conclude = parsed_json.get("ready_to_conclude", False)
+                thoughts = parsed_json.get("thoughts", "Parsed from JSON")
+                
+                # Validate next_agent
+                valid_agents = self.all_agent_names + ["Conclusion"]
+                if next_agent not in valid_agents:
+                    next_agent = self._parse_next_agent_from_text(response_text)
+                
+                class ParsedDecision(BaseModel):
+                    thoughts: str
+                    response: str
+                    next_agent: str
+                    ready_to_conclude: bool
+                
+                decision = ParsedDecision(
+                    thoughts=thoughts,
+                    response=response_text,
+                    next_agent=next_agent,
+                    ready_to_conclude=ready_to_conclude
+                )
+                yield {"type": "complete", "decision": decision, "full_response": full_response}
+                
+            except Exception as parse_error:
+                print(f"JSON parsing failed: {parse_error}, using text fallback")
+                # Extract response content from the raw text
+                response_text = self._extract_response_from_text(full_response)
+                next_agent = self._parse_next_agent_from_text(response_text)
+                
+                class EmergencyDecision(BaseModel):
+                    thoughts: str = Field(default="Emergency fallback")
+                    response: str
+                    next_agent: str
+                    ready_to_conclude: bool = Field(default=False)
+                
+                decision = EmergencyDecision(
+                    response=response_text.strip() if response_text.strip() else "I need more time to think about this.",
+                    next_agent=next_agent
+                )
+                yield {"type": "complete", "decision": decision, "full_response": full_response}
+    
+    
+    def _extract_response_from_text(self, text: str) -> str:
+        """Extract response content from JSON text."""
+        try:
+            import json
+            # Try to find and parse JSON
+            start_brace = text.find('{')
+            end_brace = text.rfind('}')
+            if start_brace != -1 and end_brace != -1:
+                json_str = text[start_brace:end_brace + 1]
+                parsed = json.loads(json_str)
+                return parsed.get("response", text)
+        except:
+            pass
+        
+        # Fallback: return the text as is
+        return text
     
     def _parse_next_agent_from_text(self, text: str) -> str:
         """Extract the next agent name from natural language text."""

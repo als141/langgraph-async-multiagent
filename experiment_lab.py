@@ -9,6 +9,38 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src'
 from multiagent_debate.orchestrator import run_graph
 from multiagent_debate.config import AGENTS_CONFIG
 
+def extract_response_from_chunk(text: str) -> str:
+    """Extract response field content from JSON stream."""
+    try:
+        
+        # Look for the response field
+        if '"response"' in text and ':' in text:
+            response_pos = text.find('"response"')
+            after_response = text[response_pos:]
+            colon_pos = after_response.find(':')
+            if colon_pos != -1:
+                after_colon = after_response[colon_pos + 1:].strip()
+                if after_colon.startswith('"'):
+                    # Find the content between quotes
+                    quote_start = after_colon.find('"') + 1
+                    remaining = after_colon[quote_start:]
+                    
+                    # Extract until closing quote (handle escapes)
+                    content = ""
+                    i = 0
+                    while i < len(remaining):
+                        char = remaining[i]
+                        if char == '"' and (i == 0 or remaining[i-1] != '\\'):
+                            break
+                        content += char
+                        i += 1
+                    
+                    return content
+        
+        return ""
+    except:
+        return ""
+
 async def main():
     """Main function to run the debate from the command line."""
     topic = "消費税減税は日本経済にプラスか？"
@@ -33,11 +65,15 @@ async def main():
             if agent_name not in current_agent_message:
                 current_agent_message[agent_name] = ""
                 print(f"\n[{agent_name}]: ", end="", flush=True)
-            current_agent_message[agent_name] += chunk
-            print(chunk, end="", flush=True)
+            
+            # Extract response content from JSON chunk
+            display_chunk = extract_response_from_chunk(current_agent_message[agent_name] + chunk)
+            if display_chunk != current_agent_message[agent_name]:
+                new_content = display_chunk[len(current_agent_message[agent_name]):]
+                current_agent_message[agent_name] = display_chunk
+                print(new_content, end="", flush=True)
         elif event["type"] == "agent_message_complete":
             agent_name = event["agent_name"]
-            message = event["message"]
             print() # New line after streaming completes
             current_agent_message[agent_name] = "" # Clear partial message
         elif event["type"] == "status_update":

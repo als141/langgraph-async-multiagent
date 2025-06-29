@@ -65,8 +65,8 @@ class DebateUI:
                     # Topic input
                     ui.label('Debate Topic:').classes('text-subtitle1 font-bold')
                     self.topic_input = ui.input(
-                        placeholder='例：消費税減税は日本経済にプラスか？',
-                        value='消費税減税は日本経済にプラスか？'
+                        placeholder='例：少子高齢化の解決策は何か？',
+                        value='少子高齢化の解決策は何か？'
                     ).classes('w-full')
                     
                     # Max turns input
