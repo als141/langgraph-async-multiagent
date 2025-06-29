@@ -21,6 +21,8 @@ AGENT_AVATARS["status"] = "⚙️"
 # --- Session State Initialization ---
 if "is_running" not in st.session_state:
     st.session_state.is_running = False
+if "_partial_agent_messages" not in st.session_state:
+    st.session_state._partial_agent_messages = {}
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "conclusion_data" not in st.session_state:
@@ -100,10 +102,38 @@ if st.session_state.is_running:
         generator = st.session_state.debate_generator
         event = loop.run_until_complete(generator.__anext__())
 
-        if event["type"] == "agent_message":
+        if event["type"] == "agent_message_chunk":
             agent_name = event["agent_name"]
-            message_content = f"**{agent_name}:** {event['message']}"
-            st.session_state.messages.append({"role": agent_name, "content": message_content})
+            chunk = event["chunk"]
+            if agent_name not in st.session_state._partial_agent_messages:
+                st.session_state._partial_agent_messages[agent_name] = ""
+            st.session_state._partial_agent_messages[agent_name] += chunk
+            
+            # Update or add message with streaming content
+            found = False
+            for i, msg in enumerate(st.session_state.messages):
+                if msg["role"] == agent_name and msg.get("is_streaming", False):
+                    st.session_state.messages[i]["content"] = f"**{agent_name}:** {st.session_state._partial_agent_messages[agent_name]}"
+                    found = True
+                    break
+            if not found:
+                st.session_state.messages.append({
+                    "role": agent_name, 
+                    "content": f"**{agent_name}:** {st.session_state._partial_agent_messages[agent_name]}",
+                    "is_streaming": True
+                })
+
+        elif event["type"] == "agent_message_complete":
+            agent_name = event["agent_name"]
+            message_content = event["message"]
+            # Update the streaming message to complete
+            for i, msg in enumerate(st.session_state.messages):
+                if msg["role"] == agent_name and msg.get("is_streaming", False):
+                    st.session_state.messages[i]["content"] = f"**{agent_name}:** {message_content}"
+                    st.session_state.messages[i]["is_streaming"] = False
+                    break
+            if agent_name in st.session_state._partial_agent_messages:
+                del st.session_state._partial_agent_messages[agent_name]
         
         elif event["type"] == "facilitator_message":
             st.session_state.messages.append({"role": "Facilitator", "content": f'*_{event["message"]}_*'})
@@ -111,15 +141,27 @@ if st.session_state.is_running:
         elif event["type"] == "status_update":
             st.session_state.status_message = event["message"]
 
-        elif event["type"] == "pre_conclusion":
+        elif event["type"] == "pre_conclusion_chunk":
+            if "pre_conclusion" not in st.session_state.conclusion_data:
+                st.session_state.conclusion_data["pre_conclusion"] = ""
+            st.session_state.conclusion_data["pre_conclusion"] += event["chunk"]
+            st.session_state.status_message = ""
+
+        elif event["type"] == "pre_conclusion_complete":
             st.session_state.conclusion_data["pre_conclusion"] = event["content"]
             st.session_state.status_message = ""
 
-        elif event["type"] == "final_comments":
+        elif event["type"] == "final_comments_complete":
             st.session_state.conclusion_data["final_comments"] = event["content"]
             st.session_state.status_message = ""
 
-        elif event["type"] == "conclusion":
+        elif event["type"] == "conclusion_chunk":
+            if "conclusion" not in st.session_state.conclusion_data:
+                st.session_state.conclusion_data["conclusion"] = ""
+            st.session_state.conclusion_data["conclusion"] += event["chunk"]
+            st.session_state.status_message = ""
+
+        elif event["type"] == "conclusion_complete":
             st.session_state.conclusion_data["conclusion"] = event["conclusion"]
             st.session_state.status_message = ""
         
@@ -127,6 +169,7 @@ if st.session_state.is_running:
             st.session_state.is_running = False
             st.balloons()
 
+        # Force immediate rerun for smoother streaming
         st.rerun()
 
     except StopAsyncIteration:

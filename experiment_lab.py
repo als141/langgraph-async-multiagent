@@ -21,27 +21,50 @@ async def main():
     print(f"Max Turns: {max_turns}")
     print("-------------------------")
 
-    final_conclusion = None
+    current_agent_message = {}
+    current_pre_conclusion = ""
+    current_conclusion = ""
+    final_conclusion = ""
 
     async for event in run_graph(topic, max_turns=max_turns):
-        if event["type"] == "agent_message":
-            # The message is already printed by the graph node, so we just observe
-            pass
+        if event["type"] == "agent_message_chunk":
+            agent_name = event["agent_name"]
+            chunk = event["chunk"]
+            if agent_name not in current_agent_message:
+                current_agent_message[agent_name] = ""
+                print(f"\n[{agent_name}]: ", end="", flush=True)
+            current_agent_message[agent_name] += chunk
+            print(chunk, end="", flush=True)
+        elif event["type"] == "agent_message_complete":
+            agent_name = event["agent_name"]
+            message = event["message"]
+            print() # New line after streaming completes
+            current_agent_message[agent_name] = "" # Clear partial message
         elif event["type"] == "status_update":
-            print(f"\n--- {event['message']} ---\n")
+            print(f"\n{event['message']}")
         elif event["type"] == "facilitator_message":
-            print(f"\n--- Facilitator: {event['message']} ---\n")
-        elif event["type"] == "pre_conclusion":
-            print("\n--- Preliminary Conclusion ---")
-            pprint.pprint(event["content"])
-        elif event["type"] == "final_comments":
+            print(f"\n--- Facilitator: {event['message']} ---")
+        elif event["type"] == "pre_conclusion_chunk":
+            if not current_pre_conclusion:
+                print(f"\n--- Preliminary Conclusion ---\n", end="", flush=True)
+            current_pre_conclusion += event["chunk"]
+            print(event["chunk"], end="", flush=True)
+        elif event["type"] == "pre_conclusion_complete":
+            print() # New line after streaming completes
+            current_pre_conclusion = ""
+        elif event["type"] == "final_comments_complete":
             print("\n--- Final Comments ---")
             for comment in event["content"]:
                 print(comment)
-        elif event["type"] == "conclusion":
+        elif event["type"] == "conclusion_chunk":
+            if not current_conclusion:
+                print(f"\n--- Final Conclusion ---\n", end="", flush=True)
+            current_conclusion += event["chunk"]
+            print(event["chunk"], end="", flush=True)
+        elif event["type"] == "conclusion_complete":
             final_conclusion = event["conclusion"]
-            print("\n--- Final Conclusion ---")
-            pprint.pprint(final_conclusion)
+            print() # New line after streaming completes
+            current_conclusion = ""
         elif event["type"] == "end_of_debate":
             print("\n--- End of Debate ---")
 
