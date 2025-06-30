@@ -1,5 +1,3 @@
-
-
 """
 Orchestrator with Subjective Views and Logging
 """
@@ -132,7 +130,7 @@ async def run_graph(topic: str, max_turns: int = 10):
 
 # Helper streaming functions
 async def pre_conclusion_node_streaming(state):
-    """Streaming version of pre_conclusion_node."""
+    """Streaming version of pre_conclusion_node with improved OpenAI Responses API handling."""
     from .graph import llm
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.messages import SystemMessage, HumanMessage
@@ -160,34 +158,33 @@ async def pre_conclusion_node_streaming(state):
     chain = prompt | llm
     full_response = ""
     
-    async for chunk in chain.astream({"topic": state["topic"]}):
-        if hasattr(chunk, 'content'):
-            content = chunk.content
-            if isinstance(content, list):
-                chunk_text = ""
-                for item in content:
-                    if isinstance(item, dict) and 'text' in item:
-                        chunk_text += item['text']
-                    # Skip dict items that only contain metadata like {'index': 0}
-                    elif isinstance(item, dict) and len(item) == 1 and 'index' in item:
-                        continue
-                full_response += chunk_text
-                if chunk_text:
-                    yield {"type": "pre_conclusion_chunk", "chunk": chunk_text}
-            else:
-                content_str = str(content)
-                # Filter out common OpenAI Responses API artifacts
-                if content_str.strip() in ["{'index': 0}", "{'index':0}", "{\"index\":0}", "{\"index\": 0}"]:
-                    content_str = ""
-                full_response += content_str
-                if content_str:
-                    yield {"type": "pre_conclusion_chunk", "chunk": content_str}
-    
-    state["preliminary_conclusion"] = full_response
-    yield {"type": "pre_conclusion_complete", "content": full_response}
+    try:
+        async for chunk in chain.astream({"topic": state["topic"]}):
+            if hasattr(chunk, 'content'):
+                content_text = _extract_clean_content_from_chunk(chunk.content)
+                if content_text:
+                    full_response += content_text
+                    yield {"type": "pre_conclusion_chunk", "chunk": content_text}
+        
+        state["preliminary_conclusion"] = full_response
+        yield {"type": "pre_conclusion_complete", "content": full_response}
+        
+    except Exception as e:
+        print(f"Pre-conclusion streaming failed: {e}")
+        # Fallback to non-streaming
+        try:
+            result = await chain.ainvoke({"topic": state["topic"]})
+            content = _extract_text_from_response(result)
+            state["preliminary_conclusion"] = content
+            yield {"type": "pre_conclusion_complete", "content": content}
+        except Exception as fallback_error:
+            print(f"Pre-conclusion fallback failed: {fallback_error}")
+            error_content = "暫定的な結論の生成中にエラーが発生しました。議論を続行します。"
+            state["preliminary_conclusion"] = error_content
+            yield {"type": "pre_conclusion_complete", "content": error_content}
 
 async def conclusion_node_streaming(state):
-    """Streaming version of conclusion_node."""
+    """Streaming version of conclusion_node with improved error handling."""
     from .graph import llm
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.messages import SystemMessage, HumanMessage
@@ -225,28 +222,65 @@ async def conclusion_node_streaming(state):
     chain = prompt | llm
     full_conclusion = ""
     
-    async for chunk in chain.astream({}):
-        if hasattr(chunk, 'content'):
-            content = chunk.content
-            if isinstance(content, list):
-                chunk_text = ""
-                for item in content:
-                    if isinstance(item, dict) and 'text' in item:
-                        chunk_text += item['text']
-                    # Skip dict items that only contain metadata like {'index': 0}
-                    elif isinstance(item, dict) and len(item) == 1 and 'index' in item:
-                        continue
-                full_conclusion += chunk_text
-                if chunk_text:
-                    yield {"type": "conclusion_chunk", "chunk": chunk_text}
-            else:
-                content_str = str(content)
-                # Filter out common OpenAI Responses API artifacts
-                if content_str.strip() in ["{'index': 0}", "{'index':0}", "{\"index\":0}", "{\"index\": 0}"]:
-                    content_str = ""
-                full_conclusion += content_str
-                if content_str:
-                    yield {"type": "conclusion_chunk", "chunk": content_str}
-    
-    state["conclusion"] = full_conclusion
-    yield {"type": "conclusion_complete", "conclusion": full_conclusion}
+    try:
+        async for chunk in chain.astream({}):
+            if hasattr(chunk, 'content'):
+                content_text = _extract_clean_content_from_chunk(chunk.content)
+                if content_text:
+                    full_conclusion += content_text
+                    yield {"type": "conclusion_chunk", "chunk": content_text}
+        
+        state["conclusion"] = full_conclusion
+        yield {"type": "conclusion_complete", "conclusion": full_conclusion}
+        
+    except Exception as e:
+        print(f"Conclusion streaming failed: {e}")
+        # Fallback to non-streaming
+        try:
+            result = await chain.ainvoke({})
+            content = _extract_text_from_response(result)
+            state["conclusion"] = content
+            yield {"type": "conclusion_complete", "conclusion": content}
+        except Exception as fallback_error:
+            print(f"Conclusion fallback failed: {fallback_error}")
+            error_content = "最終結論の生成中にエラーが発生しました。議論の記録は保存されています。"
+            state["conclusion"] = error_content
+            yield {"type": "conclusion_complete", "conclusion": error_content}
+
+def _extract_clean_content_from_chunk(content):
+    """Extract clean content from OpenAI Responses API chunk format"""
+    if isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get('type') == 'text' and 'text' in item:
+                    text_parts.append(item['text'])
+                elif 'text' in item and 'index' not in item:
+                    text_parts.append(item['text'])
+                # Skip metadata-only items
+                elif len(item) == 1 and 'index' in item:
+                    continue
+        return ''.join(text_parts)
+    elif isinstance(content, str):
+        # Filter out common OpenAI Responses API artifacts
+        artifacts = [
+            "{'index': 0}", "{'index':0}", 
+            '{"index":0}', '{"index": 0}',
+            '[{"index": 0}]'
+        ]
+        if content.strip() not in artifacts:
+            return content
+    return ""
+
+def _extract_text_from_response(response):
+    """Extract text content from various response formats"""
+    if hasattr(response, 'content'):
+        if isinstance(response.content, str):
+            return response.content
+        elif isinstance(response.content, list):
+            return _extract_clean_content_from_chunk(response.content)
+    elif isinstance(response, str):
+        return response
+    elif isinstance(response, dict) and 'content' in response:
+        return response['content']
+    return str(response)
