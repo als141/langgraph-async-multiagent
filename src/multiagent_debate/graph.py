@@ -1,5 +1,3 @@
-
-
 """
 New LangGraph Workflow for Conversational Agents (Async Corrected)
 """
@@ -33,6 +31,45 @@ class FacilitatorDecision(BaseModel):
     reasoning: str = Field(description="Explanation of why this action was chosen")
     message: str = Field(description="Message to display to participants about the facilitation decision")
 
+# --- Helper Functions for Content Extraction ---
+def _extract_clean_content_from_chunk(content):
+    """Extract clean content from OpenAI Responses API chunk format"""
+    if isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get('type') == 'text' and 'text' in item:
+                    text_parts.append(item['text'])
+                elif 'text' in item and 'index' not in item:
+                    text_parts.append(item['text'])
+                # Skip metadata-only items
+                elif len(item) == 1 and 'index' in item:
+                    continue
+        return ''.join(text_parts)
+    elif isinstance(content, str):
+        # Filter out common OpenAI Responses API artifacts
+        artifacts = [
+            "{'index': 0}", "{'index':0}", 
+            '{"index":0}', '{"index": 0}',
+            '[{"index": 0}]'
+        ]
+        if content.strip() not in artifacts:
+            return content
+    return ""
+
+def _extract_text_from_response(response):
+    """Extract text content from various response formats"""
+    if hasattr(response, 'content'):
+        if isinstance(response.content, str):
+            return response.content
+        elif isinstance(response.content, list):
+            return _extract_clean_content_from_chunk(response.content)
+    elif isinstance(response, str):
+        return response
+    elif isinstance(response, dict) and 'content' in response:
+        return response['content']
+    return str(response)
+
 # --- Graph Nodes (Async) ---
 
 async def agent_node_streaming(state: ConversationState):
@@ -42,10 +79,16 @@ async def agent_node_streaming(state: ConversationState):
 
     if speaker_name not in agent_names and speaker_name != "Conclusion":
         print(f"[Warning] Invalid next_speaker: '{speaker_name}'. Using round-robin.")
-        last_speaker_name = state["full_transcript"][-1].split(":")[0].strip("[]").split(" ")[-1]
-        last_speaker_index = agent_names.index(last_speaker_name)
-        next_speaker_index = (last_speaker_index + 1) % len(agent_names)
-        speaker_name = agent_names[next_speaker_index]
+        if state["full_transcript"]:
+            last_speaker_name = state["full_transcript"][-1].split(":")[0].strip("[]").split(" ")[-1]
+            try:
+                last_speaker_index = agent_names.index(last_speaker_name)
+                next_speaker_index = (last_speaker_index + 1) % len(agent_names)
+                speaker_name = agent_names[next_speaker_index]
+            except ValueError:
+                speaker_name = agent_names[0] if agent_names else "Conclusion"
+        else:
+            speaker_name = agent_names[0] if agent_names else "Conclusion"
         state["next_speaker"] = speaker_name
 
     current_agent_state = state["agent_states"][speaker_name]
@@ -67,13 +110,17 @@ async def agent_node_streaming(state: ConversationState):
     except Exception as e:
         print(f"Streaming failed for {speaker_name}, falling back to non-streaming: {e}")
         # Fallback to non-streaming
-        decision = await agent.chain.ainvoke({
-            "persona": agent.agent_state["persona"],
-            "subjective_view": agent.agent_state["subjective_view"],
-            "topic": agent.topic,
-            "agent_names_str": ", ".join(agent.all_agent_names),
-            "chat_history": agent.agent_state["chat_history"],
-        })
+        try:
+            decision = await agent.chain.ainvoke({
+                "persona": agent.agent_state["persona"],
+                "subjective_view": agent.agent_state["subjective_view"],
+                "topic": agent.topic,
+                "agent_names_str": ", ".join(agent.all_agent_names),
+                "chat_history": agent.agent_state["chat_history"],
+            })
+        except Exception as fallback_error:
+            print(f"Non-streaming fallback also failed for {speaker_name}: {fallback_error}")
+            decision = agent._create_emergency_response(str(fallback_error))
     
     if decision is None:
         # Emergency fallback
@@ -81,7 +128,7 @@ async def agent_node_streaming(state: ConversationState):
         from pydantic import BaseModel
         class EmergencyDecision(BaseModel):
             thoughts: str = "Unable to generate proper response"
-            response: str = full_response_text if full_response_text.strip() else "I need more time to think about this topic."
+            response: str = full_response_text if full_response_text.strip() else "議論を続けましょう。"
             next_agent: str = agent_names[0] if agent_names else "Conclusion"
             ready_to_conclude: bool = False
         decision = EmergencyDecision()
@@ -129,10 +176,16 @@ async def agent_node(state: ConversationState) -> ConversationState:
 
     if speaker_name not in agent_names and speaker_name != "Conclusion":
         print(f"[Warning] Invalid next_speaker: '{speaker_name}'. Using round-robin.")
-        last_speaker_name = state["full_transcript"][-1].split(":")[0].strip("[]").split(" ")[-1]
-        last_speaker_index = agent_names.index(last_speaker_name)
-        next_speaker_index = (last_speaker_index + 1) % len(agent_names)
-        speaker_name = agent_names[next_speaker_index]
+        if state["full_transcript"]:
+            last_speaker_name = state["full_transcript"][-1].split(":")[0].strip("[]").split(" ")[-1]
+            try:
+                last_speaker_index = agent_names.index(last_speaker_name)
+                next_speaker_index = (last_speaker_index + 1) % len(agent_names)
+                speaker_name = agent_names[next_speaker_index]
+            except ValueError:
+                speaker_name = agent_names[0] if agent_names else "Conclusion"
+        else:
+            speaker_name = agent_names[0] if agent_names else "Conclusion"
         state["next_speaker"] = speaker_name
 
     current_agent_state = state["agent_states"][speaker_name]
@@ -140,23 +193,30 @@ async def agent_node(state: ConversationState) -> ConversationState:
 
     # Use streaming decision method
     decision = None
-    async for event in agent.astream_decision():
-        if event["type"] == "chunk":
-            # This will be caught by orchestrator streaming events
-            pass
-        elif event["type"] == "complete":
-            decision = event["decision"]
-            break
+    try:
+        async for event in agent.astream_decision():
+            if event["type"] == "chunk":
+                # This will be caught by orchestrator streaming events
+                pass
+            elif event["type"] == "complete":
+                decision = event["decision"]
+                break
+    except Exception as e:
+        print(f"Agent streaming failed: {e}")
     
     if decision is None:
         # Fallback to non-streaming if streaming fails
-        decision = await agent.chain.ainvoke({
-            "persona": agent.agent_state["persona"],
-            "subjective_view": agent.agent_state["subjective_view"],
-            "topic": agent.topic,
-            "agent_names_str": ", ".join(agent.all_agent_names),
-            "chat_history": agent.agent_state["chat_history"],
-        })
+        try:
+            decision = await agent.chain.ainvoke({
+                "persona": agent.agent_state["persona"],
+                "subjective_view": agent.agent_state["subjective_view"],
+                "topic": agent.topic,
+                "agent_names_str": ", ".join(agent.all_agent_names),
+                "chat_history": agent.agent_state["chat_history"],
+            })
+        except Exception as fallback_error:
+            print(f"Agent fallback failed: {fallback_error}")
+            decision = agent._create_emergency_response(str(fallback_error))
 
     ai_message = AIMessage(content=decision.response, name=speaker_name)
     human_message = HumanMessage(content=f"（{speaker_name}の発言）: {decision.response}", name="human")
@@ -276,15 +336,18 @@ async def facilitator_node(state: ConversationState) -> ConversationState:
 """)
     ])
     
-    facilitator_llm = llm.with_structured_output(FacilitatorDecision)
+    facilitator_llm = llm.with_structured_output(FacilitatorDecision, strict=True)
     facilitator_chain = facilitator_prompt | facilitator_llm
     
-    full_decision = FacilitatorDecision(action="", reasoning="", message="")
-    async for chunk in facilitator_chain.astream({"topic": state["topic"]}):
-        if chunk.action is not None: full_decision.action = chunk.action
-        if chunk.reasoning is not None: full_decision.reasoning = chunk.reasoning
-        if chunk.message is not None: full_decision.message = chunk.message
-    decision = full_decision
+    try:
+        decision = await facilitator_chain.ainvoke({"topic": state["topic"]})
+    except Exception as e:
+        print(f"Facilitator decision failed: {e}, using default continue action")
+        decision = FacilitatorDecision(
+            action="continue",
+            reasoning="Technical error occurred, continuing discussion",
+            message="議論を継続します。"
+        )
     
     state["facilitator_action"] = decision.action
     state["facilitator_message"] = decision.message
@@ -316,18 +379,16 @@ async def pre_conclusion_node(state: ConversationState) -> ConversationState:
 上記の議論を踏まえ、暫定的なまとめを作成し、参加者に最終確認を求めてください。
 """)
     ])
+    
     chain = prompt | llm
-    full_response = ""
-    async for chunk in chain.astream({"topic": state["topic"]}):
-        if isinstance(chunk.content, list):
-            # Handle OpenAI Responses API format
-            chunk_text = ""
-            for item in chunk.content:
-                if isinstance(item, dict) and 'text' in item:
-                    chunk_text += item['text']
-            full_response += chunk_text
-        else:
-            full_response += chunk.content
+    
+    try:
+        result = await chain.ainvoke({"topic": state["topic"]})
+        full_response = _extract_text_from_response(result)
+    except Exception as e:
+        print(f"Pre-conclusion generation failed: {e}")
+        full_response = "暫定的な結論の生成中にエラーが発生しました。これまでの議論の主要なポイントを手動でまとめることをお勧めします。"
+    
     state["preliminary_conclusion"] = full_response
     print(f"Preliminary Conclusion: {state['preliminary_conclusion']}")
     state["logger"].info(f"Preliminary conclusion generated: {state['preliminary_conclusion']}")
@@ -360,30 +421,32 @@ async def final_comment_node(state: ConversationState) -> ConversationState:
 """)
         ])
         chain = prompt | llm
-        full_comment = ""
-        async for chunk in chain.astream({}):
-            if isinstance(chunk.content, list):
-                # Handle OpenAI Responses API format
-                chunk_text = ""
-                for item in chunk.content:
-                    if isinstance(item, dict) and 'text' in item:
-                        chunk_text += item['text']
-                full_comment += chunk_text
-            else:
-                full_comment += chunk.content
-        comment_text = full_comment
+        
+        try:
+            result = await chain.ainvoke({})
+            comment_text = _extract_text_from_response(result)
+        except Exception as e:
+            print(f"Final comment generation failed for {agent_name}: {e}")
+            comment_text = f"技術的な問題により、{agent_name}の最終コメントを生成できませんでした。"
+        
         print(f"{agent_name}: {comment_text}")
         state["logger"].info(f"Final comment from {agent_name}: {comment_text}")
         return f"[{agent_name}] {comment_text}"
 
     # Concurrently get final comments from all agents
-    final_comments = await asyncio.gather(*[get_comment(name) for name in agent_names])
-    state["final_comments"] = final_comments
+    try:
+        final_comments = await asyncio.gather(*[get_comment(name) for name in agent_names])
+        state["final_comments"] = final_comments
+    except Exception as e:
+        print(f"Final comments generation failed: {e}")
+        state["final_comments"] = [f"[Error] 最終コメントの生成中にエラーが発生しました: {str(e)}"]
+    
     return state
 
 async def conclusion_node(state: ConversationState) -> ConversationState:
     """Generates the final conclusion asynchronously."""
     print("\n--- Generating Final Conclusion ---")
+    
     if state["preliminary_conclusion"] and state["final_comments"]:
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content=f"""あなたは議論の結論をまとめる専門家です。以下の情報を統合して、最終的な結論を作成してください。
@@ -415,17 +478,21 @@ async def conclusion_node(state: ConversationState) -> ConversationState:
         ])
     
     chain = prompt | llm
-    full_conclusion = ""
-    async for chunk in chain.astream({}):
-        if isinstance(chunk.content, list):
-            # Handle OpenAI Responses API format
-            chunk_text = ""
-            for item in chunk.content:
-                if isinstance(item, dict) and 'text' in item:
-                    chunk_text += item['text']
-            full_conclusion += chunk_text
-        else:
-            full_conclusion += chunk.content
+    
+    try:
+        result = await chain.ainvoke({})
+        full_conclusion = _extract_text_from_response(result)
+    except Exception as e:
+        print(f"Final conclusion generation failed: {e}")
+        full_conclusion = f"""最終結論の生成中にエラーが発生しました。
+
+**議論のテーマ:** {state['topic']}
+
+**議論の記録:**
+{chr(10).join(state['full_transcript'][-5:]) if state['full_transcript'] else '記録がありません'}
+
+技術的な問題により、完全な結論を生成できませんでしたが、上記の議論記録を参考にしてください。"""
+    
     state["conclusion"] = full_conclusion
     print(f"Final Conclusion: {state['conclusion']}")
     return state
