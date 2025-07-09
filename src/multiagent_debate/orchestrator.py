@@ -42,7 +42,7 @@ def get_subjective_perspective_from_config(my_name: str, all_agents_config: List
     return "\n".join(descriptions)
 
 async def run_graph(topic: str, max_turns: int = 10):
-    """Asynchronous wrapper for running the debate graph and yielding events."""
+    """Direct streaming wrapper for running the debate."""
     
     logger = setup_debate_logger()
     
@@ -60,7 +60,7 @@ async def run_graph(topic: str, max_turns: int = 10):
             subjective_view=subjective_view
         )
 
-    initial_state = ConversationState(
+    state = ConversationState(
         topic=topic,
         agent_states=agent_states,
         next_speaker=initial_speaker,
@@ -82,53 +82,171 @@ async def run_graph(topic: str, max_turns: int = 10):
         pending_questions=[]
     )
 
-    app = create_debate_graph()
+    # Import here to avoid circular imports
+    from .graph import agent_node_streaming, update_metrics_node, facilitator_node, pre_conclusion_node, final_comment_node, conclusion_node
+    from .graph import route_after_metrics, route_after_facilitator
 
-    async for event in app.astream_events(initial_state, version="v1", config={"recursion_limit": 50}):
-        kind = event["event"]
-        node_name = event["name"]
-
-        if kind == "on_chain_start":
-            if node_name == "pre_conclusion_node":
-                yield {"type": "status_update", "message": "--- Pre-Conclusion: Preparing Draft Summary ---"}
-            elif node_name == "final_comment_node":
-                yield {"type": "status_update", "message": "--- Final Comments: Last Chance for Input ---"}
-            elif node_name == "conclusion_node":
-                yield {"type": "status_update", "message": "--- Generating Final Conclusion ---"}
-
-        elif kind == "on_chain_end":
-            output = event["data"].get("output")
-
-            if node_name == "agent_node":
-                if not output or not output.get("full_transcript"):
-                    continue
-                latest_transcript_entry = output.get("full_transcript", [])[-1]
+    try:
+        while state["current_turn"] < state["max_turns"] and state["next_speaker"] != "Conclusion":
+            # Agent speaking turn with streaming
+            async for event in agent_node_streaming(state):
+                yield event
                 
-                if ": " in latest_transcript_entry:
-                    parts = latest_transcript_entry.split(": ", 1)
-                    speaker_part = parts[0]
-                    message = parts[1]
-                    speaker_name = speaker_part.split("] ")[-1]
-                else:
-                    speaker_name = "Unknown"
-                    message = latest_transcript_entry
-
-                yield {"type": "agent_message", "agent_name": speaker_name, "message": message}
-
-            elif node_name == "facilitator_node":
-                if output and output.get("facilitator_message"):
-                    yield {"type": "facilitator_message", "message": output.get("facilitator_message")}
-
-            elif node_name == "pre_conclusion_node":
-                if output and output.get("preliminary_conclusion"):
-                    yield {"type": "pre_conclusion", "content": output.get("preliminary_conclusion")}
-
-            elif node_name == "final_comment_node":
-                if output and output.get("final_comments"):
-                    yield {"type": "final_comments", "content": output.get("final_comments")}
+            # Update metrics
+            state = await update_metrics_node(state)
             
-            elif node_name == "conclusion_node":
-                if output and output.get("conclusion"):
-                    yield {"type": "conclusion", "conclusion": output.get("conclusion")}
-
+            # Route decision
+            next_step = route_after_metrics(state)
+            
+            if next_step == "facilitator_node":
+                state = await facilitator_node(state)
+                yield {"type": "facilitator_message", "message": state.get("facilitator_message", "")}
+                
+                facilitator_route = route_after_facilitator(state)
+                if facilitator_route == "pre_conclusion_node":
+                    break
+                    
+            elif next_step == "conclusion_node":
+                break
+        
+        # Final conclusion sequence
+        if state["current_turn"] >= state["max_turns"] or state["next_speaker"] == "Conclusion":
+            yield {"type": "status_update", "message": "--- Pre-Conclusion: Preparing Draft Summary ---"}
+            async for event in pre_conclusion_node_streaming(state):
+                yield event
+            
+            yield {"type": "status_update", "message": "--- Final Comments: Last Chance for Input ---"}
+            state = await final_comment_node(state)
+            if state.get("final_comments"):
+                yield {"type": "final_comments_complete", "content": state["final_comments"]}
+            
+            yield {"type": "status_update", "message": "--- Generating Final Conclusion ---"}
+            async for event in conclusion_node_streaming(state):
+                yield event
+    
+    except Exception as e:
+        print(f"Error in run_graph: {e}")
+        yield {"type": "error", "message": str(e)}
+    
     yield {"type": "end_of_debate"}
+
+# Helper streaming functions
+async def pre_conclusion_node_streaming(state):
+    """Streaming version of pre_conclusion_node."""
+    from .graph import llm
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.messages import SystemMessage, HumanMessage
+    
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessage(content="""あなたは議論のファシリテータです。これまでの議論をまとめて、暫定的な結論案を作成してください。
+
+**重要な指示:**
+1. 議論全体を客観的に要約してください
+2. 主要な論点とそれぞれの立場を明確に記述してください
+3. 合意に至った点と意見が分かれた点を区別してください
+4. 「これはまだ暫定的なまとめです」ということを明記してください
+5. 参加者に補足や修正意見を求めてください
+
+議論のテーマ: {topic}"""),
+        HumanMessage(content=f"""
+以下の議論の記録を基に、暫定的な結論案を作成してください：
+
+{chr(10).join(state['full_transcript'])}
+
+上記の議論を踏まえ、暫定的なまとめを作成し、参加者に最終確認を求めてください。
+""")
+    ])
+    
+    chain = prompt | llm
+    full_response = ""
+    
+    async for chunk in chain.astream({"topic": state["topic"]}):
+        if hasattr(chunk, 'content'):
+            content = chunk.content
+            if isinstance(content, list):
+                chunk_text = ""
+                for item in content:
+                    if isinstance(item, dict) and 'text' in item:
+                        chunk_text += item['text']
+                    # Skip dict items that only contain metadata like {'index': 0}
+                    elif isinstance(item, dict) and len(item) == 1 and 'index' in item:
+                        continue
+                full_response += chunk_text
+                if chunk_text:
+                    yield {"type": "pre_conclusion_chunk", "chunk": chunk_text}
+            else:
+                content_str = str(content)
+                # Filter out common OpenAI Responses API artifacts
+                if content_str.strip() in ["{'index': 0}", "{'index':0}", "{\"index\":0}", "{\"index\": 0}"]:
+                    content_str = ""
+                full_response += content_str
+                if content_str:
+                    yield {"type": "pre_conclusion_chunk", "chunk": content_str}
+    
+    state["preliminary_conclusion"] = full_response
+    yield {"type": "pre_conclusion_complete", "content": full_response}
+
+async def conclusion_node_streaming(state):
+    """Streaming version of conclusion_node."""
+    from .graph import llm
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.messages import SystemMessage, HumanMessage
+    
+    if state["preliminary_conclusion"] and state["final_comments"]:
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=f"""あなたは議論の結論をまとめる専門家です。以下の情報を統合して、最終的な結論を作成してください。
+
+**重要な指示:**
+1. 暫定的な結論案を基礎として使用してください
+2. 参加者の最終意見を十分に考慮して、必要な修正や補足を行ってください
+3. 最終的な結論は包括的で、全ての重要な論点を含むようにしてください
+4. 意見が分かれた場合は、それも明確に記述してください
+
+議論のテーマ: {state["topic"]}"""),
+            HumanMessage(content=f"""
+**暫定的な結論案:**
+{state['preliminary_conclusion']}
+
+**参加者の最終意見:**
+{chr(10).join(state['final_comments'])}
+
+**完全な議論記録:**
+{chr(10).join(state['full_transcript'])}
+
+上記の情報を統合して、最終的な結論を作成してください。
+""")
+        ])
+    else:
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content="あなたは議論の結論をまとめる専門家です。以下の議論の完全な記録を読み、最終的な結論を客観的に要約してください。意見が分かれた場合は、それも明確に記述してください。議論のテーマ:" + state["topic"]),
+            HumanMessage(content="\n".join(state["full_transcript"])) 
+        ])
+    
+    chain = prompt | llm
+    full_conclusion = ""
+    
+    async for chunk in chain.astream({}):
+        if hasattr(chunk, 'content'):
+            content = chunk.content
+            if isinstance(content, list):
+                chunk_text = ""
+                for item in content:
+                    if isinstance(item, dict) and 'text' in item:
+                        chunk_text += item['text']
+                    # Skip dict items that only contain metadata like {'index': 0}
+                    elif isinstance(item, dict) and len(item) == 1 and 'index' in item:
+                        continue
+                full_conclusion += chunk_text
+                if chunk_text:
+                    yield {"type": "conclusion_chunk", "chunk": chunk_text}
+            else:
+                content_str = str(content)
+                # Filter out common OpenAI Responses API artifacts
+                if content_str.strip() in ["{'index': 0}", "{'index':0}", "{\"index\":0}", "{\"index\": 0}"]:
+                    content_str = ""
+                full_conclusion += content_str
+                if content_str:
+                    yield {"type": "conclusion_chunk", "chunk": content_str}
+    
+    state["conclusion"] = full_conclusion
+    yield {"type": "conclusion_complete", "conclusion": full_conclusion}
