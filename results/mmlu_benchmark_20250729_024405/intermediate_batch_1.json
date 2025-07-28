@@ -1,0 +1,11 @@
+[
+  {
+    "question_id": "11286",
+    "final_conclusion": "議論中にエラーが発生しました: cannot import name 'conclusion_node_streaming' from 'src.score.graph' (/home/als0028/study/master-research/langgraph-async-multiagent/src/score/graph.py)",
+    "full_transcript": [],
+    "turn_count": 0,
+    "debate_duration": 0.0007596015930175781,
+    "facilitator_interventions": 0,
+    "consensus_score": 0.0
+  }
+]

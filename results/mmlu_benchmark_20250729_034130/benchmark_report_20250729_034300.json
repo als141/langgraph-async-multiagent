@@ -1,0 +1,30 @@
+{
+  "total_questions": 1,
+  "correct_answers": 1,
+  "overall_accuracy": 1.0,
+  "category_accuracies": {
+    "engineering": 1.0
+  },
+  "category_counts": {
+    "engineering": 1
+  },
+  "average_turns": 0.0,
+  "average_processing_time": 87.84249639511108,
+  "confidence_weighted_accuracy": 1.0,
+  "detailed_results": [
+    {
+      "question_id": "11286",
+      "predicted_answer": "C",
+      "correct_answer": "C",
+      "is_correct": true,
+      "confidence_score": 0.3333333333333333,
+      "debate_turns": 0,
+      "processing_time": 87.84249639511108,
+      "category": "engineering",
+      "extraction_method": "pattern_matching",
+      "reasoning": "パターンマッチングで'C'を1回検出"
+    }
+  ],
+  "execution_time": 87.84366011619568,
+  "timestamp": "2025-07-29 03:43:00"
+}

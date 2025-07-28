@@ -1,0 +1,2 @@
+question_id,predicted_answer,correct_answer,is_correct,confidence_score,debate_turns,processing_time,category,extraction_method,reasoning
+11286,C,C,True,0.3333333333333333,0,87.84249639511108,engineering,pattern_matching,パターンマッチングで'C'を1回検出

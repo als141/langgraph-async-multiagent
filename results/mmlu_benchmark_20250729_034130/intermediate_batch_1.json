@@ -1,0 +1,11 @@
+[
+  {
+    "question_id": "11286",
+    "final_conclusion": "\n## 議論分析と最終判定\n\n**参加者の議論要約:**\n  # 最後の3発言\n\n**分析結果:**\nスタックはデータ構造の一種で、LIFO（Last In, First Out）方式でデータを管理します。選択肢CのLIFO memoryがスタックの別名として最も適切です。他の選択肢はスタックの特性を正確に表していません。\n\n**判定結果:**\n- 選択された回答: C\n- 信頼度: 0.95\n\n**最終回答: C**\n",
+    "full_transcript": [],
+    "turn_count": 0,
+    "debate_duration": 87.84249639511108,
+    "facilitator_interventions": 0,
+    "consensus_score": 0.0
+  }
+]
