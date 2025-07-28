@@ -9,6 +9,10 @@ import asyncio
 import argparse
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
+
+# 環境変数を読み込み
+load_dotenv()
 
 # プロジェクトルートをPythonパスに追加
 project_root = Path(__file__).parent

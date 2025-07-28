@@ -84,7 +84,6 @@ class ConversationalAgent:
             MessagesPlaceholder(variable_name="chat_history"),
         ])
         self.chain = prompt | self.structured_llm
-        self.streaming_chain = prompt | llm
 
     def invoke(self) -> BaseModel:
         """Invoke the agent to get its decision."""
@@ -98,7 +97,7 @@ class ConversationalAgent:
         })
 
     async def astream_decision(self):
-        """Stream response with simple character-by-character extraction."""
+        """Get structured response using only JSON output (single API call)."""
         agent_names_str = ", ".join(self.all_agent_names)
         input_data = {
             "persona": self.agent_state["persona"],
@@ -108,130 +107,27 @@ class ConversationalAgent:
             "chat_history": self.agent_state["chat_history"],
         }
         
-        # Stream the raw response and immediately display chunks
-        full_response = ""
-        
-        async for chunk in self.streaming_chain.astream(input_data):
-            if hasattr(chunk, 'content'):
-                content = chunk.content
-                if isinstance(content, list):
-                    # Handle OpenAI Responses API format: [{'type': 'text', 'text': '...', 'index': 0}]
-                    content_str = ""
-                    for item in content:
-                        if isinstance(item, dict) and 'text' in item:
-                            content_str += item['text']
-                        elif isinstance(item, dict) and 'type' in item and item['type'] == 'text' and 'text' in item:
-                            content_str += item['text']
-                        # Skip dict items that only contain metadata like {'index': 0}
-                        elif isinstance(item, dict) and len(item) == 1 and 'index' in item:
-                            continue
-                        elif not isinstance(item, dict):
-                            content_str += str(item)
-                else:
-                    content_str = str(content)
-                    # Filter out common OpenAI Responses API artifacts
-                    if content_str.strip() in ["{'index': 0}", "{'index':0}", "{\"index\":0}", "{\"index\": 0}"]:
-                        content_str = ""
-                
-                if content_str:
-                    full_response += content_str
-                    # For now, just stream everything and filter later
-                    yield {"type": "chunk", "content": content_str}
-        
-        # Parse the complete response for structured output
+        # Use only structured output to avoid double API calls
         try:
             final_decision = await self.chain.ainvoke(input_data)
-            yield {"type": "complete", "decision": final_decision, "full_response": full_response}
+            
+            # Simulate streaming by yielding the response field as a single chunk
+            if hasattr(final_decision, 'response'):
+                response_text = final_decision.response
+                yield {"type": "chunk", "content": response_text}
+            
+            yield {"type": "complete", "decision": final_decision, "full_response": final_decision.response if hasattr(final_decision, 'response') else ""}
             
         except Exception as e:
-            print(f"Structured decision failed: {e}, attempting JSON parsing")
-            # Fallback: try to parse the full response as JSON
-            try:
-                import json
-                
-                # Clean up the response for JSON parsing
-                json_str = full_response.strip()
-                if not json_str.startswith('{'):
-                    # Find the first { and last }
-                    start_brace = json_str.find('{')
-                    end_brace = json_str.rfind('}')
-                    if start_brace != -1 and end_brace != -1:
-                        json_str = json_str[start_brace:end_brace + 1]
-                
-                parsed_json = json.loads(json_str)
-                
-                # Extract required fields
-                response_text = parsed_json.get("response", "")
-                next_agent = parsed_json.get("next_agent", self.all_agent_names[0] if self.all_agent_names else "Conclusion")
-                ready_to_conclude = parsed_json.get("ready_to_conclude", False)
-                thoughts = parsed_json.get("thoughts", "Parsed from JSON")
-                
-                # Validate next_agent
-                valid_agents = self.all_agent_names + ["Conclusion"]
-                if next_agent not in valid_agents:
-                    next_agent = self._parse_next_agent_from_text(response_text)
-                
-                class ParsedDecision(BaseModel):
-                    thoughts: str
-                    response: str
-                    next_agent: str
-                    ready_to_conclude: bool
-                
-                decision = ParsedDecision(
-                    thoughts=thoughts,
-                    response=response_text,
-                    next_agent=next_agent,
-                    ready_to_conclude=ready_to_conclude
-                )
-                yield {"type": "complete", "decision": decision, "full_response": full_response}
-                
-            except Exception as parse_error:
-                print(f"JSON parsing failed: {parse_error}, using text fallback")
-                # Extract response content from the raw text
-                response_text = self._extract_response_from_text(full_response)
-                next_agent = self._parse_next_agent_from_text(response_text)
-                
-                class EmergencyDecision(BaseModel):
-                    thoughts: str = Field(default="Emergency fallback")
-                    response: str
-                    next_agent: str
-                    ready_to_conclude: bool = Field(default=False)
-                
-                decision = EmergencyDecision(
-                    response=response_text.strip() if response_text.strip() else "I need more time to think about this.",
-                    next_agent=next_agent
-                )
-                yield {"type": "complete", "decision": decision, "full_response": full_response}
-    
-    
-    def _extract_response_from_text(self, text: str) -> str:
-        """Extract response content from JSON text."""
-        try:
-            import json
-            # Try to find and parse JSON
-            start_brace = text.find('{')
-            end_brace = text.rfind('}')
-            if start_brace != -1 and end_brace != -1:
-                json_str = text[start_brace:end_brace + 1]
-                parsed = json.loads(json_str)
-                return parsed.get("response", text)
-        except:
-            pass
-        
-        # Fallback: return the text as is
-        return text
-    
-    def _parse_next_agent_from_text(self, text: str) -> str:
-        """Extract the next agent name from natural language text."""
-        # Look for common patterns like "田中、どう思う？" or "鈴木の意見は？"
-        for agent_name in self.all_agent_names:
-            if agent_name in text:
-                # Check if it appears near the end (likely a nomination)
-                agent_pos = text.rfind(agent_name)
-                if agent_pos > len(text) * 0.5:  # In the latter half of the text
-                    return agent_name
-        
-        # If no clear nomination found, round robin
-        if self.all_agent_names:
-            return self.all_agent_names[0]
-        return "Conclusion"
+            print(f"Structured decision failed: {e}")
+            
+            # Simple fallback without additional API calls
+            class EmergencyDecision:
+                def __init__(self):
+                    self.thoughts = "Structured output failed"
+                    self.response = "I need more time to analyze this topic."
+                    self.next_agent = self.all_agent_names[0] if self.all_agent_names else "Conclusion"
+                    self.ready_to_conclude = False
+            
+            emergency_decision = EmergencyDecision()
+            yield {"type": "complete", "decision": emergency_decision, "full_response": emergency_decision.response}

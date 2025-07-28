@@ -16,10 +16,62 @@ from .data_loader import MMLUProblem
 from .answer_extractor import AnswerExtractor
 
 # MMLU用の構造化結論生成関数
+def _clean_transcript_entry(entry: str) -> str:
+    """議論記録のエントリーからJSONのresponseフィールドのみを抽出"""
+    import json
+    import re
+    
+    # エージェント名と内容を分離
+    if ': ' not in entry:
+        return entry
+    
+    agent_name, content = entry.split(': ', 1)
+    
+    # 複数行JSONや不完全JSONの処理
+    content = content.strip()
+    
+    # JSONの開始を検出
+    if content.startswith('{') or 'json' in content.lower():
+        # JSONブロックを抽出する複数のパターンを試行
+        json_patterns = [
+            r'\{.*?\}',  # 単一行JSON
+            r'\{[^}]*"response"\s*:\s*"([^"]*)"[^}]*\}',  # responseフィールドを直接抽出
+            r'"response"\s*:\s*"([^"]*)"',  # responseフィールドのみ
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, content, re.DOTALL)
+            if matches:
+                if pattern == r'"response"\s*:\s*"([^"]*)"':
+                    # responseフィールドの値を直接取得
+                    return f"{agent_name}: {matches[0]}"
+                else:
+                    # JSON全体から解析
+                    for match in matches:
+                        try:
+                            if isinstance(match, str) and match.startswith('{'):
+                                parsed = json.loads(match)
+                                if 'response' in parsed:
+                                    return f"{agent_name}: {parsed['response']}"
+                        except (json.JSONDecodeError, KeyError, TypeError):
+                            continue
+        
+        # JSONマーカーを削除して通常テキストとして処理
+        content = re.sub(r'^.*?json\s*', '', content, flags=re.IGNORECASE)
+        content = re.sub(r'```.*?```', '', content, flags=re.DOTALL)
+        content = re.sub(r'\{.*?\}', '', content, flags=re.DOTALL)
+        content = content.strip()
+        
+        if content:
+            return f"{agent_name}: {content}"
+    
+    return entry
+
 async def generate_mmlu_structured_conclusion(
     full_transcript: List[str], 
     topic: str, 
-    available_choices: List[str]
+    available_choices: List[str],
+    final_comments: List[str] = None
 ) -> str:
     """MMLU問題用の構造化された結論を生成"""
     from .structured_output import MMLUStructuredExtractor
@@ -28,15 +80,25 @@ async def generate_mmlu_structured_conclusion(
     extractor = MMLUStructuredExtractor()
     
     try:
+        # 議論記録をクリーンアップ（JSONのresponseフィールドのみ抽出）
+        cleaned_transcript = [_clean_transcript_entry(entry) for entry in full_transcript]
+        
+        # 最終コメントがある場合は追加
+        if final_comments:
+            # 最終コメントセクションを追加
+            cleaned_transcript.append("=== エージェント最終意見 ===")
+            for comment in final_comments:
+                cleaned_transcript.append(_clean_transcript_entry(comment))
+        
         # 構造化された回答を抽出
-        structured_result = extractor.extract_final_answer(full_transcript, topic, available_choices)
+        structured_result = extractor.extract_final_answer(cleaned_transcript, topic, available_choices)
         
         # 結論文を構築（構造化された情報を使用）
         conclusion = f"""
 ## 議論分析と最終判定
 
 **参加者の議論要約:**
-{chr(10).join(full_transcript[-3:])}  # 最後の3発言
+{chr(10).join(cleaned_transcript[-5:])}  # クリーンアップされた最後の5発言（最終意見を含む）
 
 **分析結果:**
 {structured_result.reasoning_summary}
@@ -61,13 +123,19 @@ async def generate_mmlu_structured_conclusion(
         
         available_letters = [chr(ord('A') + i) for i in range(len(available_choices))]
         
+        # フォールバック用の議論記録を作成（最終コメントを含む）
+        fallback_transcript = full_transcript.copy()
+        if final_comments:
+            fallback_transcript.append("=== エージェント最終意見 ===")
+            fallback_transcript.extend(final_comments)
+        
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content=f"""議論を分析し、最適な選択肢を決定してください。
 利用可能な選択肢: {', '.join(available_letters)}
 必ず「最終回答: [文字]」の形式で回答してください。"""),
             HumanMessage(content=f"""
 議論記録:
-{chr(10).join(full_transcript)}
+{chr(10).join(fallback_transcript)}
 
 問題:
 {topic}
@@ -113,14 +181,59 @@ async def run_mmlu_graph(topic: str, max_turns: int = 15) -> Dict[str, Any]:
         results = []
         full_transcript = []
         
+        # エージェント別のメッセージバッファ
+        agent_messages = {}
+        final_comments = []
+        
         async for event in run_graph(topic, max_turns):
             results.append(event)
-            if event.get("type") == "agent_message":
-                full_transcript.append(f"{event.get('agent_name', 'Unknown')}: {event.get('message', '')}")
+            
+            # 最終コメント収集
+            if event.get("type") == "final_comments_complete":
+                final_comments = event.get("content", [])
+                print(f"最終コメント収集: {len(final_comments)}件")
+            
+            if event.get("type") == "agent_message_chunk":
+                # ストリーミングメッセージのチャンクを結合
+                agent_name = event.get('agent_name', 'Unknown')
+                chunk = event.get('chunk', '')
+                
+                if agent_name not in agent_messages:
+                    agent_messages[agent_name] = ""
+                agent_messages[agent_name] += chunk
+                
+            elif event.get("type") == "agent_message_complete":
+                # エージェントメッセージ完了時に記録
+                agent_name = event.get('agent_name', 'Unknown')
+                if agent_name in agent_messages:
+                    complete_message = agent_messages[agent_name].strip()
+                    
+                    # JSONの場合はresponseフィールドを抽出
+                    extracted_message = complete_message
+                    try:
+                        import json
+                        if complete_message.strip().startswith('{') and complete_message.strip().endswith('}'):
+                            parsed = json.loads(complete_message.strip())
+                            if 'response' in parsed:
+                                extracted_message = parsed['response']
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        # JSONでない場合や解析失敗時はそのまま使用
+                        pass
+                    
+                    full_transcript.append(f"{agent_name}: {extracted_message}")
+                    agent_messages[agent_name] = ""  # リセット
+                    
+            elif event.get("type") == "agent_message":
+                # 非ストリーミングメッセージ（フォールバック）
+                agent_name = event.get('agent_name', 'Unknown')
+                message = event.get('message', '')
+                full_transcript.append(f"{agent_name}: {message}")
+                print(f"[Turn {len(full_transcript)}] {agent_name}: {message}")
+                
             elif event.get("type") == "conclusion_complete":
                 # 通常の結論ではなく、MMLU用の結論を生成
                 break
-                
+        
         # MMLU専用の構造化結論生成
         # 選択肢を抽出
         options_match = re.search(r'\*\*選択肢:\*\*\n(.*?)(?=\n\*\*|$)', topic, re.DOTALL)
@@ -135,7 +248,7 @@ async def run_mmlu_graph(topic: str, max_turns: int = 15) -> Dict[str, Any]:
         if not available_choices:
             available_choices = ["選択肢A", "選択肢B", "選択肢C", "選択肢D"]  # フォールバック
         
-        mmlu_conclusion = await generate_mmlu_structured_conclusion(full_transcript, topic, available_choices)
+        mmlu_conclusion = await generate_mmlu_structured_conclusion(full_transcript, topic, available_choices, final_comments)
         
         return {
             "conclusion": mmlu_conclusion,
@@ -195,7 +308,7 @@ class MMLUOrchestrator:
 5. 最終的に「答えは○○です」の形で明確に選択肢を示してください
 
 **重要な制約:**
-- 必ず選択肢A、B、C、D（またはそれ以上）の中から一つを選んでください
+- 必ず選択肢A、B、C、D、E、F、G、H、I、Jの中から一つを選んでください
 - 「分からない」や「判断できない」は避けてください
 - 根拠を示して論理的に説明してください"""
         
