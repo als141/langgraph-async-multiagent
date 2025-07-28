@@ -15,5 +15,5 @@ uv.lock
 logs/*
 experiment_results/*
 conversation_logs/*
-
+results
 .env
