@@ -70,8 +70,21 @@ class MMLUDataLoader:
         try:
             # 標準的なリスト形式に変換を試行
             if options_str.startswith('[') and options_str.endswith(']'):
-                # まず正規表現でクォートされた項目を抽出（改行含む）
-                pattern = r"'([^']*?)'"
+                # まずJSON形式での解析を試行（最も確実）
+                import json
+                try:
+                    options = json.loads(options_str)
+                    clean_options = []
+                    for option in options:
+                        clean_option = re.sub(r'\s+', ' ', str(option).strip())
+                        if clean_option:
+                            clean_options.append(clean_option)
+                    return clean_options
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                
+                # JSON解析に失敗した場合、ダブルクォート用正規表現を試行
+                pattern = r'\"([^\"]*?)\"'
                 matches = re.findall(pattern, options_str, re.DOTALL)
                 
                 if matches:
@@ -81,6 +94,18 @@ class MMLUDataLoader:
                         # 改行文字を空白に置換し、連続する空白を単一に
                         clean_option = re.sub(r'\s+', ' ', match.strip())
                         if clean_option:  # 空文字列でない場合のみ追加
+                            clean_options.append(clean_option)
+                    return clean_options
+                
+                # シングルクォート用正規表現を試行
+                pattern = r"'([^']*?)'"
+                matches = re.findall(pattern, options_str, re.DOTALL)
+                
+                if matches:
+                    clean_options = []
+                    for match in matches:
+                        clean_option = re.sub(r'\s+', ' ', match.strip())
+                        if clean_option:
                             clean_options.append(clean_option)
                     return clean_options
                 

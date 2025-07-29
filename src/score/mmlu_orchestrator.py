@@ -71,7 +71,8 @@ async def generate_mmlu_structured_conclusion(
     full_transcript: List[str], 
     topic: str, 
     available_choices: List[str],
-    final_comments: List[str] = None
+    final_comments: List[str] = None,
+    generated_conclusion: str = None
 ) -> str:
     """MMLU問題用の構造化された結論を生成"""
     from .structured_output import MMLUStructuredExtractor
@@ -90,8 +91,13 @@ async def generate_mmlu_structured_conclusion(
             for comment in final_comments:
                 cleaned_transcript.append(_clean_transcript_entry(comment))
         
-        # 構造化された回答を抽出
-        structured_result = extractor.extract_final_answer(cleaned_transcript, topic, available_choices)
+        # 生成された最終結論を直接使用して構造化された回答を抽出
+        structured_result = extractor.extract_final_answer(
+            cleaned_transcript, 
+            topic, 
+            available_choices, 
+            final_conclusion=generated_conclusion
+        )
         
         # 結論文を構築（構造化された情報を使用）
         conclusion = f"""
@@ -184,6 +190,7 @@ async def run_mmlu_graph(topic: str, max_turns: int = 15) -> Dict[str, Any]:
         # エージェント別のメッセージバッファ
         agent_messages = {}
         final_comments = []
+        generated_conclusion = None  # conclusion_nodeで生成された結論を格納
         
         async for event in run_graph(topic, max_turns):
             results.append(event)
@@ -231,7 +238,9 @@ async def run_mmlu_graph(topic: str, max_turns: int = 15) -> Dict[str, Any]:
                 print(f"[Turn {len(full_transcript)}] {agent_name}: {message}")
                 
             elif event.get("type") == "conclusion_complete":
-                # 通常の結論ではなく、MMLU用の結論を生成
+                # conclusion_nodeで生成された最終結論を取得
+                generated_conclusion = event.get("conclusion", "")
+                print(f"Generated conclusion captured: {len(generated_conclusion)} characters")
                 break
         
         # MMLU専用の構造化結論生成
@@ -248,7 +257,13 @@ async def run_mmlu_graph(topic: str, max_turns: int = 15) -> Dict[str, Any]:
         if not available_choices:
             available_choices = ["選択肢A", "選択肢B", "選択肢C", "選択肢D"]  # フォールバック
         
-        mmlu_conclusion = await generate_mmlu_structured_conclusion(full_transcript, topic, available_choices, final_comments)
+        mmlu_conclusion = await generate_mmlu_structured_conclusion(
+            full_transcript, 
+            topic, 
+            available_choices, 
+            final_comments, 
+            generated_conclusion  # conclusion_nodeで生成された結論を渡す
+        )
         
         return {
             "conclusion": mmlu_conclusion,

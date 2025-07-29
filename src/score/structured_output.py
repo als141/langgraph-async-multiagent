@@ -119,7 +119,8 @@ class MMLUStructuredExtractor:
         self, 
         full_transcript: List[str], 
         topic: str, 
-        available_choices: List[str]
+        available_choices: List[str],
+        final_conclusion: str = None
     ) -> MMLUStructuredAnswer:
         """
         議論の記録から構造化された最終回答を抽出
@@ -137,7 +138,7 @@ class MMLUStructuredExtractor:
         valid_choices = self._determine_valid_choices(available_choices)
         
         # プロンプト作成（システムとユーザーを分離）
-        prompt_data = self._create_extraction_prompt(full_transcript, topic, valid_choices)
+        prompt_data = self._create_extraction_prompt(full_transcript, topic, valid_choices, final_conclusion)
         
         # 構造化出力で回答を抽出（リトライ機能付き）
         max_retries = 3
@@ -176,7 +177,7 @@ class MMLUStructuredExtractor:
                 
                 if attempt < max_retries - 1:
                     # リトライ時はより明示的なプロンプトを使用
-                    prompt_data = self._create_explicit_prompt(full_transcript, topic, valid_choices)
+                    prompt_data = self._create_explicit_prompt(full_transcript, topic, valid_choices, final_conclusion)
                     continue
         
         # 全ての試行が失敗した場合のフォールバック
@@ -201,25 +202,77 @@ class MMLUStructuredExtractor:
         
         return question, options
     
+    def _extract_final_conclusion(self, full_transcript: List[str]) -> str:
+        """議論記録から最終結論部分を抽出（「議論の結論をまとめる専門家」の出力）"""
+        if not full_transcript:
+            return "議論記録が見つかりません。"
+        
+        # 議論記録を逆順で検索し、最終結論の部分を探す
+        conclusion_text = ""
+        
+        # パターン1: "Final Conclusion:" で始まる部分を探す
+        for i in range(len(full_transcript) - 1, -1, -1):
+            message = full_transcript[i]
+            if "Final Conclusion:" in message:
+                conclusion_start = message.find("Final Conclusion:")
+                if conclusion_start != -1:
+                    conclusion_text = message[conclusion_start + len("Final Conclusion:"):].strip()
+                    break
+        
+        # パターン2: "最終結論" や "まとめ" などのキーワードを含む長いメッセージを探す
+        if not conclusion_text:
+            for i in range(len(full_transcript) - 1, -1, -1):
+                message = full_transcript[i]
+                # 最終結論らしいメッセージの特徴をチェック
+                if (("最終結論" in message or "まとめ" in message or "結論" in message) 
+                    and len(message) > 200):  # 十分長いメッセージ
+                    conclusion_text = message
+                    break
+        
+        # パターン3: エージェントの発言ではない長いメッセージ（システム生成の結論）を探す
+        if not conclusion_text:
+            for i in range(len(full_transcript) - 1, -1, -1):
+                message = full_transcript[i]
+                # エージェント名で始まらない長いメッセージ
+                if (not message.startswith(("[", "佐藤:", "鈴木:", "田中:")) 
+                    and len(message) > 300):
+                    conclusion_text = message
+                    break
+        
+        # パターン4: 最後の数メッセージから最も長いものを選択
+        if not conclusion_text:
+            last_messages = full_transcript[-5:] if len(full_transcript) >= 5 else full_transcript
+            conclusion_text = max(last_messages, key=len) if last_messages else "議論記録が不完全です。"
+        
+        return conclusion_text
+    
     def _create_extraction_prompt(
         self, 
         full_transcript: List[str], 
         topic: str, 
-        valid_choices: List[str]
+        valid_choices: List[str],
+        final_conclusion: str = None
     ) -> dict:
-        """構造化抽出用のプロンプト作成（システムとユーザーを分離）"""
+        """構造化抽出用のプロンプト作成（最終結論をユーザープロンプトとして使用）"""
         
         # topicから問題文と選択肢のみを抽出
         question, options = self._extract_question_and_options(topic)
         
-        system_prompt = f"""あなたは多肢選択問題の議論分析専門家です。
+        system_prompt = f"""あなたは多肢選択問題の回答決定専門家です。
 
-以下の指示に従って分析してください:
-- 議論の内容を客観的に分析してください
-- 参加者の合意や論理的な根拠を重視してください
+議論の最終結論から、最適な選択肢を決定してください。
+
+**重要な指示:**
+- 議論の最終結論に記載された内容を最優先で参考にしてください
 - 必ず {', '.join(valid_choices)} のいずれかを選択してください
-- 信頼度は議論の一致度と論理的妥当性に基づいて設定してください
+- 信頼度は結論の明確さと論理的妥当性に基づいて設定してください
 - 推論要約は100文字以内で簡潔に説明してください
+
+**問題:**
+{question}
+
+**選択肢:**
+{options}
 
 回答は以下のJSON形式で行ってください:
 {{
@@ -228,16 +281,11 @@ class MMLUStructuredExtractor:
   "reasoning_summary": "選択理由の要約"
 }}"""
 
-        user_prompt = f"""以下の議論記録を分析し、参加者の意見を総合して最適な選択肢を決定してください。
-
-**問題:**
-{question}
-
-**選択肢:**
-{options}
-
-**議論記録:**
-{chr(10).join(full_transcript)}"""
+        # 最終結論が直接渡された場合はそれを使用、なければ議論記録から抽出
+        if final_conclusion:
+            user_prompt = final_conclusion
+        else:
+            user_prompt = self._extract_final_conclusion(full_transcript)
 
         return {
             "system": system_prompt,
@@ -248,21 +296,30 @@ class MMLUStructuredExtractor:
         self, 
         full_transcript: List[str], 
         topic: str, 
-        valid_choices: List[str]
+        valid_choices: List[str],
+        final_conclusion: str = None
     ) -> dict:
-        """より明示的なリトライ用プロンプト（システムとユーザーを分離）"""
+        """より明示的なリトライ用プロンプト（最終結論をユーザープロンプトとして使用）"""
         
         # topicから問題文と選択肢のみを抽出
         question, options = self._extract_question_and_options(topic)
         
-        system_prompt = f"""あなたは多肢選択問題の議論分析専門家です。
+        system_prompt = f"""あなたは多肢選択問題の回答決定専門家です。
 
 【重要】これはリトライです。より注意深く分析してください。
 
-必須要件:
-- final_answer: {valid_choices} のいずれか一つを厳密に選択
-- confidence: 0.0から1.0の数値
-- reasoning_summary: 10文字以上100文字以下の説明
+**重要な指示:**
+- 議論の最終結論に記載された内容を最優先で参考にしてください
+- 必須要件:
+  - final_answer: {valid_choices} のいずれか一つを厳密に選択
+  - confidence: 0.0から1.0の数値
+  - reasoning_summary: 10文字以上100文字以下の説明
+
+**問題:**
+{question}
+
+**選択肢:**
+{options}
 
 回答は必ずJSON形式で行ってください:
 {{
@@ -271,16 +328,11 @@ class MMLUStructuredExtractor:
   "reasoning_summary": "選択理由の要約"
 }}"""
 
-        user_prompt = f"""以下の議論記録を分析し、参加者の意見を総合して最適な選択肢を決定してください。
-
-**問題:**
-{question}
-
-**選択肢:**
-{options}
-
-**議論内容（最新5発言）:**
-{chr(10).join(full_transcript[-5:]) if full_transcript else "議論記録なし"}"""
+        # 最終結論が直接渡された場合はそれを使用、なければ議論記録から抽出
+        if final_conclusion:
+            user_prompt = final_conclusion
+        else:
+            user_prompt = self._extract_final_conclusion(full_transcript)
 
         return {
             "system": system_prompt,
