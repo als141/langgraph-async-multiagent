@@ -205,6 +205,7 @@ class MMLUBenchmarkRunner:
             # バッチ内の問題を並列実行（制限付き）
             semaphore = asyncio.Semaphore(self.config.max_concurrent)
             batch_tasks = []
+            active_problems = []
             
             for problem in batch:
                 if problem.question_id in self.progress.completed_questions:
@@ -212,6 +213,14 @@ class MMLUBenchmarkRunner:
                     
                 task = self._run_single_problem_with_semaphore(semaphore, problem)
                 batch_tasks.append(task)
+                active_problems.append(problem)
+            
+            # バッチ内の問題を一覧表示（並行実行される問題）
+            if active_problems:
+                print(f"🔄 {len(active_problems)}問を並行実行開始:")
+                for problem in active_problems:
+                    short_question = problem.question_ja[:60] + "..." if len(problem.question_ja) > 60 else problem.question_ja
+                    print(f"  - 問題 {problem.question_id}: {short_question}")
             
             # バッチ実行
             if batch_tasks:

@@ -182,6 +182,11 @@ async def main():
         print(f"❌ エラー: データセットファイルが見つかりません: {args.dataset}")
         sys.exit(1)
     
+    # max_concurrentがbatch_sizeより小さい場合は自動調整
+    effective_max_concurrent = max(args.max_concurrent, args.batch_size)
+    if effective_max_concurrent != args.max_concurrent:
+        print(f"⚠️  max_concurrent を {args.max_concurrent} から {effective_max_concurrent} に自動調整しました（バッチサイズに合わせて並行実行）")
+    
     # 設定作成
     config = BenchmarkConfig(
         dataset_path=args.dataset,
@@ -189,7 +194,7 @@ async def main():
         max_turns_per_question=args.max_turns,
         questions_per_category=args.questions_per_category,
         batch_size=args.batch_size,
-        max_concurrent=args.max_concurrent,
+        max_concurrent=effective_max_concurrent,
         timeout_per_question=args.timeout,
         save_intermediate_results=True,
         log_dir=args.log_dir

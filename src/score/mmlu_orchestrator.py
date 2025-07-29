@@ -333,7 +333,7 @@ class MMLUOrchestrator:
         """単一問題の議論を実行"""
         start_time = time.time()
         
-        print(f"問題 {problem.question_id} の議論を開始: {problem.question_ja}")
+        print(f"🔄 問題 {problem.question_id} の議論開始")
         
         # 議論トピックの作成
         topic = self.format_mmlu_topic(problem)
